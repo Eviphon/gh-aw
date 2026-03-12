@@ -303,6 +303,8 @@ function buildForkContextHint() {
 
 /**
  * Build a context string describing code-push failures for inclusion in failure issue/comment bodies.
+ * Manifest file protection refusals are separated from other push failures to give them a dedicated
+ * section with clearer remediation instructions.
  * @param {string} codePushFailureErrors - Newline-separated list of "type:error" entries
  * @param {{number: number, html_url: string, head_sha?: string, mergeable?: boolean | null, mergeable_state?: string, updated_at?: string} | null} pullRequest - PR info if available
  * @returns {string} Formatted context string, or empty string if no failures
@@ -312,59 +314,107 @@ function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null) 
     return "";
   }
 
-  let context = "\n**⚠️ Code Push Failed**: A code push safe output failed, and subsequent safe outputs were cancelled.";
-  if (pullRequest) {
-    context += `\n\n**Target Pull Request:** [#${pullRequest.number}](${pullRequest.html_url})`;
-
-    // Add PR state diagnostics
-    const workflowSha = process.env.GITHUB_SHA || "";
-    const prDetails = [];
-
-    // Check for merge conflicts
-    if (pullRequest.mergeable === false) {
-      prDetails.push("❌ **Merge conflicts detected** - the PR has conflicts that need resolution");
-    } else if (pullRequest.mergeable_state === "dirty") {
-      prDetails.push("❌ **PR is in dirty state** - likely has merge conflicts");
-    } else if (pullRequest.mergeable_state === "blocked") {
-      prDetails.push("⚠️ **PR is blocked** - required status checks or reviews may be missing");
-    } else if (pullRequest.mergeable_state === "behind") {
-      prDetails.push("⚠️ **PR is behind base branch** - may need to be updated");
-    }
-
-    // Check if branch was updated since workflow started
-    if (workflowSha && pullRequest.head_sha && workflowSha !== pullRequest.head_sha) {
-      prDetails.push(`⚠️ **Branch was updated** - workflow started at \`${workflowSha.substring(0, 7)}\`, PR head is now \`${pullRequest.head_sha.substring(0, 7)}\``);
-    }
-
-    // Add SHA info for debugging
-    if (pullRequest.head_sha) {
-      prDetails.push(`**PR head SHA:** \`${pullRequest.head_sha.substring(0, 7)}\``);
-    }
-    if (workflowSha) {
-      prDetails.push(`**Workflow SHA:** \`${workflowSha.substring(0, 7)}\``);
-    }
-    if (pullRequest.mergeable_state && pullRequest.mergeable_state !== "unknown") {
-      prDetails.push(`**Mergeable state:** ${pullRequest.mergeable_state}`);
-    }
-
-    if (prDetails.length > 0) {
-      context += "\n\n**PR State at Push Time:**\n";
-      for (const detail of prDetails) {
-        context += `- ${detail}\n`;
-      }
-    }
-  }
-  context += "\n**Code Push Errors:**\n";
+  // Split errors into protected-file protection refusals and other push failures
+  const manifestErrors = [];
+  const otherErrors = [];
   const errorLines = codePushFailureErrors.split("\n").filter(line => line.trim());
   for (const errorLine of errorLines) {
     const colonIndex = errorLine.indexOf(":");
     if (colonIndex !== -1) {
       const type = errorLine.substring(0, colonIndex);
       const error = errorLine.substring(colonIndex + 1);
-      context += `- \`${type}\`: ${error}\n`;
+      if (error.includes("manifest files") || error.includes("protected files")) {
+        manifestErrors.push({ type, error });
+      } else {
+        otherErrors.push({ type, error });
+      }
     }
   }
-  context += "\n";
+
+  let context = "";
+
+  // Protected file protection section — shown before generic failures
+  if (manifestErrors.length > 0) {
+    context +=
+      "\n**🛡️ Protected Files**: The code push was refused because the patch modifies protected files (package manifests, agent instruction files, or repository security configuration). " +
+      "This protection guards against unintended supply chain changes.\n";
+    if (pullRequest) {
+      context += `\n**Target Pull Request:** [#${pullRequest.number}](${pullRequest.html_url})\n`;
+    }
+    context += "\n**Blocked Operations:**\n";
+    for (const { type, error } of manifestErrors) {
+      context += `- \`${type}\`: ${error}\n`;
+    }
+    // Build a dynamic YAML snippet listing only the safe output types that were actually blocked
+    const typeToYamlKey = {
+      create_pull_request: "create-pull-request",
+      push_to_pull_request_branch: "push-to-pull-request-branch",
+    };
+    const blockedTypes = [...new Set(manifestErrors.map(e => e.type))];
+    let yamlSnippet = "```yaml\nsafe-outputs:\n";
+    for (const type of blockedTypes) {
+      const yamlKey = typeToYamlKey[type] || type.replace(/_/g, "-");
+      yamlSnippet += `  ${yamlKey}:\n    protected-files: fallback-to-issue\n`;
+    }
+    yamlSnippet += "```\n";
+    context += "\nTo review and apply these changes manually, configure `protected-files: fallback-to-issue` — the agent will create a review issue with instructions instead of blocking:\n";
+    context += yamlSnippet;
+  }
+
+  // Generic code-push failure section
+  if (otherErrors.length > 0) {
+    context += "\n**⚠️ Code Push Failed**: A code push safe output failed, and subsequent safe outputs were cancelled.";
+    if (pullRequest) {
+      context += `\n\n**Target Pull Request:** [#${pullRequest.number}](${pullRequest.html_url})`;
+
+      // Add PR state diagnostics
+      const workflowSha = process.env.GITHUB_SHA || "";
+      const prDetails = [];
+
+      // Check for merge conflicts
+      if (pullRequest.mergeable === false) {
+        prDetails.push("❌ **Merge conflicts detected** - the PR has conflicts that need resolution");
+      } else if (pullRequest.mergeable_state === "dirty") {
+        prDetails.push("❌ **PR is in dirty state** - likely has merge conflicts");
+      } else if (pullRequest.mergeable_state === "blocked") {
+        prDetails.push("⚠️ **PR is blocked** - required status checks or reviews may be missing");
+      } else if (pullRequest.mergeable_state === "behind") {
+        prDetails.push("⚠️ **PR is behind base branch** - may need to be updated");
+      }
+
+      // Check if branch was updated since workflow started
+      if (workflowSha && pullRequest.head_sha && workflowSha !== pullRequest.head_sha) {
+        prDetails.push(`⚠️ **Branch was updated** - workflow started at \`${workflowSha.substring(0, 7)}\`, PR head is now \`${pullRequest.head_sha.substring(0, 7)}\``);
+      }
+
+      // Add SHA info for debugging
+      if (pullRequest.head_sha) {
+        prDetails.push(`**PR head SHA:** \`${pullRequest.head_sha.substring(0, 7)}\``);
+      }
+      if (workflowSha) {
+        prDetails.push(`**Workflow SHA:** \`${workflowSha.substring(0, 7)}\``);
+      }
+      if (pullRequest.mergeable_state && pullRequest.mergeable_state !== "unknown") {
+        prDetails.push(`**Mergeable state:** ${pullRequest.mergeable_state}`);
+      }
+
+      if (prDetails.length > 0) {
+        context += "\n\n**PR State at Push Time:**\n";
+        for (const detail of prDetails) {
+          context += `- ${detail}\n`;
+        }
+      }
+    }
+    context += "\n**Code Push Errors:**\n";
+    for (const { type, error } of otherErrors) {
+      context += `- \`${type}\`: ${error}\n`;
+    }
+    context += "\n";
+  } else if (manifestErrors.length > 0) {
+    // Only manifest errors — ensure trailing newline
+    context += "\n";
+  }
+
   return context;
 }
 
@@ -454,6 +504,21 @@ function buildTimeoutContext(isTimedOut, timeoutMinutes) {
 }
 
 /**
+ * Build a context string when the Copilot CLI failed due to the token lacking inference access.
+ * @param {boolean} hasInferenceAccessError - Whether an inference access error was detected
+ * @returns {string} Formatted context string, or empty string if no error
+ */
+function buildInferenceAccessErrorContext(hasInferenceAccessError) {
+  if (!hasInferenceAccessError) {
+    return "";
+  }
+
+  const templatePath = "/opt/gh-aw/prompts/inference_access_error.md";
+  const template = fs.readFileSync(templatePath, "utf8");
+  return "\n" + template;
+}
+
+/**
  * Handle agent job failure by creating or updating a failure tracking issue
  * This script is called from the conclusion job when the agent job has failed
  * or when the agent succeeded but produced no safe outputs
@@ -476,6 +541,8 @@ async function main() {
     const codePushFailureCount = process.env.GH_AW_CODE_PUSH_FAILURE_COUNT || "0";
     const checkoutPRSuccess = process.env.GH_AW_CHECKOUT_PR_SUCCESS || "";
     const timeoutMinutes = process.env.GH_AW_TIMEOUT_MINUTES || "";
+    const inferenceAccessError = process.env.GH_AW_INFERENCE_ACCESS_ERROR === "true";
+    const pushRepoMemoryResult = process.env.GH_AW_PUSH_REPO_MEMORY_RESULT || "";
 
     // Collect repo-memory validation errors from all memory configurations
     const repoMemoryValidationErrors = [];
@@ -499,6 +566,8 @@ async function main() {
     core.info(`Create discussion error count: ${createDiscussionErrorCount}`);
     core.info(`Code push failure count: ${codePushFailureCount}`);
     core.info(`Checkout PR success: ${checkoutPRSuccess}`);
+    core.info(`Inference access error: ${inferenceAccessError}`);
+    core.info(`Push repo-memory result: ${pushRepoMemoryResult}`);
 
     // Check if the agent timed out
     const isTimedOut = agentConclusion === "timed_out";
@@ -511,6 +580,9 @@ async function main() {
 
     // Check if there are code-push failures (regardless of agent job status)
     const hasCodePushFailures = parseInt(codePushFailureCount, 10) > 0;
+
+    // Check if the push_repo_memory job itself failed (e.g. permission or config errors)
+    const hasPushRepoMemoryFailure = pushRepoMemoryResult === "failure";
 
     // Check if agent succeeded but produced no safe outputs
     let hasMissingSafeOutputs = false;
@@ -532,10 +604,10 @@ async function main() {
       }
     }
 
-    // Only proceed if the agent job actually failed OR timed out OR there are assignment errors OR create_discussion errors OR code-push failures OR missing safe outputs
+    // Only proceed if the agent job actually failed OR timed out OR there are assignment errors OR create_discussion errors OR code-push failures OR push_repo_memory failed OR missing safe outputs
     // BUT skip if we only have noop outputs (that's a successful no-action scenario)
-    if (agentConclusion !== "failure" && !isTimedOut && !hasAssignmentErrors && !hasCreateDiscussionErrors && !hasCodePushFailures && !hasMissingSafeOutputs) {
-      core.info(`Agent job did not fail and no assignment/discussion/code-push errors and has safe outputs (conclusion: ${agentConclusion}), skipping failure handling`);
+    if (agentConclusion !== "failure" && !isTimedOut && !hasAssignmentErrors && !hasCreateDiscussionErrors && !hasCodePushFailures && !hasPushRepoMemoryFailure && !hasMissingSafeOutputs) {
+      core.info(`Agent job did not fail and no assignment/discussion/code-push/push-repo-memory errors and has safe outputs (conclusion: ${agentConclusion}), skipping failure handling`);
       return;
     }
 
@@ -575,7 +647,12 @@ async function main() {
 
     // Sanitize workflow name for title
     const sanitizedWorkflowName = sanitizeContent(workflowName, { maxLength: 100 });
-    const issueTitle = `[aw] ${sanitizedWorkflowName} failed`;
+    // Detect pre-agent failure: agent never produced output (artifact was not downloaded).
+    // When the artifact download succeeds, GH_AW_AGENT_OUTPUT is set; when it fails the
+    // env var is absent, indicating the agent did not reach output-production.
+    const isPreAgentFailure = agentConclusion === "failure" && !process.env.GH_AW_AGENT_OUTPUT;
+    const failureStage = isPreAgentFailure ? " (pre-agent)" : "";
+    const issueTitle = `[aw] ${sanitizedWorkflowName} failed${failureStage}`;
 
     core.info(`Checking for existing issue with title: "${issueTitle}"`);
 
@@ -642,6 +719,13 @@ async function main() {
           repoMemoryValidationContext += "\n";
         }
 
+        // Build push_repo_memory job failure context
+        const pushRepoMemoryFailureContext = hasPushRepoMemoryFailure
+          ? "\n**⚠️ Repo-Memory Push Failed**: The push-repo-memory job failed to write memory back to the repository. This may indicate a permission issue, a configuration error, or a network problem. Check the [workflow run](" +
+            runUrl +
+            ") for details.\n\n"
+          : "";
+
         // Build missing_data context
         const missingDataContext = buildMissingDataContext();
 
@@ -664,6 +748,9 @@ async function main() {
         // Build timeout context
         const timeoutContext = buildTimeoutContext(isTimedOut, timeoutMinutes);
 
+        // Build inference access error context
+        const inferenceAccessErrorContext = buildInferenceAccessErrorContext(inferenceAccessError);
+
         // Create template context
         const templateContext = {
           run_url: runUrl,
@@ -680,10 +767,12 @@ async function main() {
           create_discussion_errors_context: createDiscussionErrorsContext,
           code_push_failure_context: codePushFailureContext,
           repo_memory_validation_context: repoMemoryValidationContext,
+          push_repo_memory_failure_context: pushRepoMemoryFailureContext,
           missing_data_context: missingDataContext,
           missing_safe_outputs_context: missingSafeOutputsContext,
           timeout_context: timeoutContext,
           fork_context: forkContext,
+          inference_access_error_context: inferenceAccessErrorContext,
         };
 
         // Render the comment template
@@ -758,6 +847,13 @@ async function main() {
           repoMemoryValidationContext += "\n";
         }
 
+        // Build push_repo_memory job failure context
+        const pushRepoMemoryFailureContext = hasPushRepoMemoryFailure
+          ? "\n**⚠️ Repo-Memory Push Failed**: The push-repo-memory job failed to write memory back to the repository. This may indicate a permission issue, a configuration error, or a network problem. Check the [workflow run](" +
+            runUrl +
+            ") for details.\n\n"
+          : "";
+
         // Build missing_data context
         const missingDataContext = buildMissingDataContext();
 
@@ -780,6 +876,9 @@ async function main() {
         // Build timeout context
         const timeoutContext = buildTimeoutContext(isTimedOut, timeoutMinutes);
 
+        // Build inference access error context
+        const inferenceAccessErrorContext = buildInferenceAccessErrorContext(inferenceAccessError);
+
         // Create template context with sanitized workflow name
         const templateContext = {
           workflow_name: sanitizedWorkflowName,
@@ -797,10 +896,12 @@ async function main() {
           create_discussion_errors_context: createDiscussionErrorsContext,
           code_push_failure_context: codePushFailureContext,
           repo_memory_validation_context: repoMemoryValidationContext,
+          push_repo_memory_failure_context: pushRepoMemoryFailureContext,
           missing_data_context: missingDataContext,
           missing_safe_outputs_context: missingSafeOutputsContext,
           timeout_context: timeoutContext,
           fork_context: forkContext,
+          inference_access_error_context: inferenceAccessErrorContext,
         };
 
         // Render the issue template
@@ -856,4 +957,4 @@ async function main() {
   }
 }
 
-module.exports = { main };
+module.exports = { main, buildCodePushFailureContext };

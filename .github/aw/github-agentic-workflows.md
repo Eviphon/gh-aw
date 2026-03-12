@@ -95,6 +95,26 @@ The YAML frontmatter supports these fields:
   - **`skip-bots:`** - Skip workflow execution when triggered by specific GitHub actors (array)
     - Bot name matching is flexible (handles with/without `[bot]` suffix)
     - Example: `skip-bots: [dependabot, renovate]` - Skip for Dependabot and Renovate
+  - **`skip-if-match:`** - Skip workflow execution when a GitHub search query returns results (string or object)
+    - String format: `skip-if-match: "is:issue is:open label:bug"` (implies max=1)
+    - Object format with threshold:
+      ```yaml
+      skip-if-match:
+        query: "is:issue is:open label:in-progress"
+        max: 3   # Skip if 3 or more matches (default: 1)
+      ```
+    - Query is automatically scoped to the current repository
+    - Use to avoid duplicate work (e.g., skip if an open issue already exists)
+  - **`skip-if-no-match:`** - Skip workflow execution when a GitHub search query returns no results (string or object)
+    - String format: `skip-if-no-match: "is:pr is:open label:ready-to-deploy"` (implies min=1)
+    - Object format with threshold:
+      ```yaml
+      skip-if-no-match:
+        query: "is:pr is:open label:ready-to-deploy"
+        min: 2   # Require at least 2 matches to proceed (default: 1)
+      ```
+    - Query is automatically scoped to the current repository
+    - Use to gate workflows on preconditions (e.g., only run if open PRs exist)
 
 - **`permissions:`** - GitHub token permissions
   - Object with permission levels: `read`, `write`, `none`
@@ -331,12 +351,13 @@ The YAML frontmatter supports these fields:
     ```
 
 - **`sandbox:`** - Sandbox configuration for AI engines (string or object)
-  - String format: `"default"` (no sandbox), `"awf"` (Agent Workflow Firewall), `"srt"` or `"sandbox-runtime"` (Anthropic Sandbox Runtime)
+  - String format: `"default"` (no sandbox), `"awf"` (Agent Workflow Firewall)
   - **⚠️ Deprecated**: Top-level `sandbox: false` is deprecated. Use `sandbox.agent: false` instead. Run `gh aw fix --write` to automatically migrate.
+  - **Note**: Legacy `"srt"` and `"sandbox-runtime"` values are automatically migrated to `"awf"`.
   - Object format for full configuration:
     ```yaml
     sandbox:
-      agent: awf                      # or "srt", or false to disable
+      agent: awf                      # or false to disable
       mcp:                            # MCP Gateway configuration (requires mcp-gateway feature flag)
         container: ghcr.io/githubnext/mcp-gateway
         port: 8080
@@ -344,7 +365,6 @@ The YAML frontmatter supports these fields:
     ```
   - **Agent sandbox options**:
     - `awf`: Agent Workflow Firewall for domain-based access control
-    - `srt`: Anthropic Sandbox Runtime for filesystem and command sandboxing
     - `false`: Disable agent firewall
   - **AWF configuration**:
     ```yaml
@@ -354,17 +374,6 @@ The YAML frontmatter supports these fields:
         mounts:
           - "/host/data:/data:ro"
           - "/host/bin/tool:/usr/local/bin/tool:ro"
-    ```
-  - **SRT configuration**:
-    ```yaml
-    sandbox:
-      agent:
-        id: srt
-        config:
-          filesystem:
-            allowWrite: [".", "/tmp"]
-            denyRead: ["/etc/secrets"]
-          enableWeakerNestedSandbox: true
     ```
   - **MCP Gateway**: Routes MCP server calls through unified HTTP gateway (experimental)
 
@@ -377,7 +386,7 @@ The YAML frontmatter supports these fields:
     - `read-only:` - The GitHub MCP server always operates in read-only mode; this field is accepted but has no effect
     - `github-token:` - Custom GitHub token
     - `lockdown:` - Enable lockdown mode to limit content surfaced from public repositories to items authored by users with push access (boolean, default: false)
-    - `app:` - GitHub App configuration for token minting; when set, mints an installation access token at workflow start that overrides `github-token`
+    - `github-app:` - GitHub App configuration for token minting; when set, mints an installation access token at workflow start that overrides `github-token`
       - `app-id:` - GitHub App ID (required, e.g., `${{ vars.APP_ID }}`)
       - `private-key:` - GitHub App private key (required, e.g., `${{ secrets.APP_PRIVATE_KEY }}`)
       - `owner:` - Optional installation owner (defaults to current repository owner)
@@ -488,6 +497,8 @@ The YAML frontmatter supports these fields:
         hide-older-comments: true       # Optional: minimize previous comments from same workflow
         allowed-reasons: [outdated]     # Optional: restrict hiding reasons (default: outdated)
         discussions: true               # Optional: set false to exclude discussions:write permission (default: true)
+        issues: true                    # Optional: set false to exclude issues:write permission (default: true)
+        pull-requests: true             # Optional: set false to exclude pull-requests:write permission (default: true)
         target-repo: "owner/repo"       # Optional: cross-repository
     ```
 
@@ -503,10 +514,11 @@ The YAML frontmatter supports these fields:
         reviewers: [user1, copilot]     # Optional: reviewers (use 'copilot' for bot)
         draft: true                     # Optional: create as draft PR (defaults to true)
         if-no-changes: "warn"           # Optional: "warn" (default), "error", or "ignore"
+        allow-empty: false              # Optional: create PR with empty branch, no changes required (default: false)
         expires: 7                      # Optional: auto-close after 7 days (supports: 2h, 7d, 2w, 1m, 1y; min: 2h)
         auto-merge: false               # Optional: enable auto-merge when checks pass (default: false)
         base-branch: "vnext"            # Optional: base branch for PR (defaults to workflow's branch)
-        fallback-as-issue: false        # Optional: create issue if PR creation fails (default: true)
+        fallback-as-issue: false        # Optional: when true (default), creates a fallback issue on PR creation failure; on permission errors, the issue includes a one-click link to create the PR via GitHub's compare URL
         target-repo: "owner/repo"       # Optional: cross-repository
         github-token-for-extra-empty-commit: ${{ secrets.MY_CI_PAT }}  # Optional: PAT or "app" to trigger CI on created PRs
     ```
@@ -993,7 +1005,6 @@ The YAML frontmatter supports these fields:
       - `staged-title:` - Staged mode preview title
       - `staged-description:` - Staged mode preview description
       - `append-only-comments:` - Create new comments instead of editing existing ones (boolean, default: false)
-      - `activation-comments:` - Set to `"false"` to disable all activation/fallback comments entirely (supports templatable boolean: literal `"true"`/`"false"` or GitHub Actions expressions)
       - `pull-request-created:` - Custom message when a PR is created. Placeholders: `{item_number}`, `{item_url}`
       - `issue-created:` - Custom message when an issue is created. Placeholders: `{item_number}`, `{item_url}`
       - `commit-pushed:` - Custom message when a commit is pushed. Placeholders: `{commit_sha}`, `{short_sha}`, `{commit_url}`
@@ -1042,6 +1053,9 @@ The YAML frontmatter supports these fields:
   - `max-bot-mentions:` - Maximum bot trigger references (e.g. `@copilot`, `@github-actions`) allowed in output before all excess are escaped with backticks (integer or expression, default: 10)
     - Set to `0` to escape all bot trigger phrases
     - Example: `max-bot-mentions: 3`
+  - `activation-comments:` - Disable all activation and fallback comments (boolean or expression, default: `true`)
+    - When `false`, disables run-started, run-success, run-failure, and PR/issue creation link comments
+    - Supports templatable boolean: `false`, `true`, or GitHub Actions expressions like `${{ inputs.activation-comments }}`
 
   **Templatable Integer Fields**: The `max`, `expires`, and `max-bot-mentions` fields (and most other numeric/boolean fields) accept GitHub Actions expression strings in addition to literal values, enabling runtime-configured limits:
   ```yaml
@@ -1064,7 +1078,7 @@ The YAML frontmatter supports these fields:
   - `concurrency-group:` - Concurrency group for the safe-outputs job (string)
     - When set, the safe-outputs job uses this concurrency group with `cancel-in-progress: false`
     - Supports GitHub Actions expressions, e.g., `"safe-outputs-${{ github.repository }}"`
-  - `app:` - GitHub App credentials for minting installation access tokens (object)
+  - `github-app:` - GitHub App credentials for minting installation access tokens (object)
     - When configured, generates a token from the app and uses it for all safe output operations (alternative to `github-token`)
     - Fields:
       - `app-id:` - GitHub App ID (required, e.g., `${{ vars.APP_ID }}`)
@@ -1074,7 +1088,7 @@ The YAML frontmatter supports these fields:
     - Example:
       ```yaml
       safe-outputs:
-        app:
+        github-app:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
         create-issue:
@@ -1218,11 +1232,13 @@ tools:
 
 For single cache (object notation):
 - `key:` - Custom cache key (defaults to `memory-${{ github.workflow }}-${{ github.run_id }}`)
+- `allowed-extensions:` - List of allowed file extensions (e.g., `[".json", ".txt"]`). Default: all extensions allowed. When set, files with other extensions are rejected.
 
 For multiple caches (array notation):
 - `id:` - Cache identifier (required for array notation, defaults to "default" if omitted)
 - `key:` - Custom cache key (defaults to `memory-{id}-${{ github.workflow }}-${{ github.run_id }}`)
 - `retention-days:` - Number of days to retain artifacts (1-90 days)
+- `allowed-extensions:` - List of allowed file extensions (e.g., `[".json", ".txt"]`). Default: all extensions allowed.
 
 **Restore Key Generation:**
 The system automatically generates restore keys by progressively splitting the cache key on '-':
@@ -1245,6 +1261,17 @@ The `repo-memory:` field enables repository-specific memory storage for maintain
 ```yaml
 tools:
   repo-memory:
+```
+
+**Advanced Configuration:**
+```yaml
+tools:
+  repo-memory:
+    branch-name: memory/agent-notes  # Optional: custom git branch name
+    target-repo: owner/other-repo    # Optional: store memory in another repo
+    allowed-extensions: [".json", ".md"]  # Optional: restrict file types (default: all allowed)
+    max-file-size: 10240             # Optional: max size per file in bytes (default: 10KB)
+    max-file-count: 100              # Optional: max files per commit (default: 100)
 ```
 
 This provides persistent memory storage specific to the repository, useful for maintaining workflow-specific context and state across runs.
@@ -2156,6 +2183,7 @@ Agentic workflows compile to GitHub Actions YAML:
 ### Deprecated Features
 
 - **`sandbox: false`** (top-level) - Deprecated. Use `sandbox.agent: false` instead. Run `gh aw fix --write` to migrate automatically.
+- **`sandbox.agent: srt`** / **`sandbox: "srt"`** / **`sandbox: "sandbox-runtime"`** - Deprecated. The Anthropic Sandbox Runtime (SRT) backend has been removed. These values are automatically migrated to `awf`.
 - **`timeout_minutes`** (underscore) - Breaking change. Must use `timeout-minutes` (with hyphen).
 - **`create-agent-task`** - Deprecated. Use `create-agent-session` instead for Copilot coding agent sessions.
 - **`safe-outputs.add-comment.discussion`** - Deprecated. The `discussion: true` flag is no longer needed; `add-comment` auto-detects the target type. Run `gh aw fix --write` with codemod `add-comment-discussion-removal` to remove it automatically.
@@ -2199,7 +2227,7 @@ The workflow frontmatter is validated against JSON Schema during compilation. Co
 
 - **Invalid field names** - Only fields in the schema are allowed
 - **Wrong field types** - e.g., `timeout-minutes` must be integer
-- **Invalid enum values** - e.g., `engine` must be "copilot", "claude", or "codex"
+- **Invalid enum values** - e.g., `engine` must be "copilot", "claude", "codex", or "gemini"
 - **Missing required fields** - Some triggers require specific configuration
 
 Use `gh aw compile --verbose` to see detailed validation messages, or `gh aw compile <workflow-id> --verbose` to validate a specific workflow.

@@ -47,10 +47,10 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	}
 
 	// Add GitHub App token minting step if app is configured
-	if data.SafeOutputs.App != nil {
+	if data.SafeOutputs.GitHubApp != nil {
 		// Compute permissions based on configured safe outputs (principle of least privilege)
 		permissions := ComputePermissionsForSafeOutputs(data.SafeOutputs)
-		steps = append(steps, c.buildGitHubAppTokenMintStep(data.SafeOutputs.App, permissions)...)
+		steps = append(steps, c.buildGitHubAppTokenMintStep(data.SafeOutputs.GitHubApp, permissions)...)
 	}
 
 	// Add artifact download steps once (shared by noop and conclusion steps)
@@ -143,6 +143,12 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_CHECKOUT_PR_SUCCESS: ${{ needs.%s.outputs.checkout_pr_success }}\n", mainJobName))
 	}
 
+	// Pass inference access error output for Copilot engine
+	// This detects when the Copilot CLI fails due to the token lacking inference access
+	if _, ok := engine.(*CopilotEngine); ok {
+		agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_INFERENCE_ACCESS_ERROR: ${{ needs.%s.outputs.inference_access_error }}\n", mainJobName))
+	}
+
 	// Pass assignment error outputs from safe_outputs job if assign-to-agent is configured
 	if data.SafeOutputs != nil && data.SafeOutputs.AssignToAgent != nil {
 		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_ASSIGNMENT_ERRORS: ${{ needs.safe_outputs.outputs.assign_to_agent_assignment_errors }}\n")
@@ -171,9 +177,12 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		}
 	}
 
-	// Pass repo-memory validation failure outputs if repo-memory is configured
-	// This allows the agent failure handler to report validation issues
+	// Pass repo-memory failure outputs if repo-memory is configured
+	// This allows the agent failure handler to report both job-level failures and validation issues
 	if data.RepoMemoryConfig != nil && len(data.RepoMemoryConfig.Memories) > 0 {
+		// Pass the overall push_repo_memory job result so the failure handler
+		// can report when the push job itself fails (e.g. permission or configuration errors)
+		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_PUSH_REPO_MEMORY_RESULT: ${{ needs.push_repo_memory.result }}\n")
 		for _, memory := range data.RepoMemoryConfig.Memories {
 			// Add validation status for each memory
 			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_REPO_MEMORY_VALIDATION_FAILED_%s: ${{ needs.push_repo_memory.outputs.validation_failed_%s }}\n", memory.ID, memory.ID))
@@ -322,7 +331,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	// See buildUnlockJob() in compiler_unlock_job.go
 
 	// Add GitHub App token invalidation step if app is configured
-	if data.SafeOutputs.App != nil {
+	if data.SafeOutputs.GitHubApp != nil {
 		notifyCommentLog.Print("Adding GitHub App token invalidation step to conclusion job")
 		steps = append(steps, c.buildGitHubAppTokenInvalidationStep()...)
 	}
@@ -385,11 +394,21 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	// Compute permissions based on configured safe outputs (principle of least privilege)
 	permissions := ComputePermissionsForSafeOutputs(data.SafeOutputs)
 
+	// Build concurrency config for the conclusion job using the workflow ID.
+	// This prevents concurrent agents on the same workflow from interfering with each other.
+	var concurrency string
+	if data.WorkflowID != "" {
+		group := "gh-aw-conclusion-" + data.WorkflowID
+		concurrency = c.indentYAMLLines(fmt.Sprintf("concurrency:\n  group: %q\n  cancel-in-progress: false", group), "    ")
+		notifyCommentLog.Printf("Configuring conclusion job concurrency group: %s", group)
+	}
+
 	job := &Job{
 		Name:        "conclusion",
 		If:          condition.Render(),
 		RunsOn:      c.formatSafeOutputsRunsOn(data.SafeOutputs),
 		Permissions: permissions.RenderToYAML(),
+		Concurrency: concurrency,
 		Steps:       steps,
 		Needs:       needs,
 		Outputs:     outputs,

@@ -108,6 +108,25 @@ Alternatively, create `.vscode/mcp.json` manually:
 
 Reload VS Code after making changes.
 
+## Configuring with Docker
+
+If `gh` is not installed locally, use the `ghcr.io/github/gh-aw` Docker image. The image ships with the GitHub CLI and gh-aw pre-installed and uses `mcp-server` as the default command.
+
+```json wrap
+{
+  "command": "docker",
+  "args": [
+    "run", "--rm", "-i",
+    "-e", "GITHUB_TOKEN",
+    "-e", "GITHUB_ACTOR",
+    "ghcr.io/github/gh-aw:latest",
+    "mcp-server"
+  ]
+}
+```
+
+Pass your GitHub token via the `GITHUB_TOKEN` environment variable. Add `--validate-actor` to the `args` array to enforce permission checks based on `GITHUB_ACTOR`.
+
 ## Available Tools
 
 The MCP server exposes the following tools for workflow management:
@@ -150,6 +169,9 @@ Compile Markdown workflows to GitHub Actions YAML with optional static analysis.
 - `errors`: Array of error objects with type, message, and line number
 - `warnings`: Array of warning objects
 - `compiled_file`: Path to generated `.lock.yml` file
+
+> [!NOTE]
+> The `actionlint`, `zizmor`, and `poutine` scanners use Docker images that download on first use. If images are still being pulled, the tool returns a "Docker images are being downloaded. Please wait and retry the compile command." message. Wait 15–30 seconds, then retry the request.
 
 ### `logs`
 

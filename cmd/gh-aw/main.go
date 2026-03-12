@@ -216,7 +216,7 @@ Examples:
 
 var compileCmd = &cobra.Command{
 	Use:   "compile [workflow]...",
-	Short: "Compile agentic workflows from Markdown to GitHub Actions YAML",
+	Short: "Compile workflow Markdown files (.md) into GitHub Actions workflows (.lock.yml)",
 	Long: `Compile one or more agentic workflows to YAML workflows.
 
 If no workflows are specified, all Markdown files in .github/workflows will be compiled.
@@ -234,7 +234,7 @@ The --dependabot flag generates dependency manifests when dependencies are detec
 
 Examples:
   ` + string(constants.CLIExtensionPrefix) + ` compile                    # Compile all Markdown files
-  ` + string(constants.CLIExtensionPrefix) + ` compile ci-doctor    # Compile a specific workflow
+  ` + string(constants.CLIExtensionPrefix) + ` compile ci-doctor          # Compile a specific workflow
   ` + string(constants.CLIExtensionPrefix) + ` compile ci-doctor daily-plan  # Compile multiple workflows
   ` + string(constants.CLIExtensionPrefix) + ` compile workflow.md        # Compile by file path
   ` + string(constants.CLIExtensionPrefix) + ` compile --dir custom/workflows  # Compile from custom directory
@@ -416,6 +416,10 @@ Examples:
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show gh aw extension version information",
+	Long: `Show the installed version of the gh aw extension.
+
+Examples:
+  ` + string(constants.CLIExtensionPrefix) + ` version   # Print the current version`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s version %s\n", string(constants.CLIExtensionPrefix), version)
 		return nil
@@ -465,6 +469,18 @@ func init() {
 
 	// Set version template to match the version subcommand format
 	rootCmd.SetVersionTemplate(string(constants.CLIExtensionPrefix) + " version {{.Version}}\n")
+
+	// Cobra generates flag descriptions using c.Name() which returns the first
+	// word of Use ("gh" from "gh aw"), producing "help for gh" and "version for
+	// gh". Explicitly initialize and override these flags so they display "gh aw".
+	rootCmd.InitDefaultHelpFlag()
+	if f := rootCmd.Flags().Lookup("help"); f != nil {
+		f.Usage = "Show help for " + string(constants.CLIExtensionPrefix)
+	}
+	rootCmd.InitDefaultVersionFlag()
+	if f := rootCmd.Flags().Lookup("version"); f != nil {
+		f.Usage = "Show version for " + string(constants.CLIExtensionPrefix)
+	}
 
 	// Fix usage lines so subcommands show "gh aw <cmd>" instead of "gh <cmd>".
 	// Cobra derives the root name from the first word of Use ("gh" from "gh aw"),

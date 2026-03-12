@@ -17,7 +17,8 @@ import (
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/fileutil"
 	"github.com/github/gh-aw/pkg/logger"
-	"github.com/github/gh-aw/pkg/repoutil"
+	"github.com/github/gh-aw/pkg/sliceutil"
+	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/github/gh-aw/pkg/workflow"
 	"github.com/spf13/cobra"
 )
@@ -109,7 +110,7 @@ Advanced examples:
 Repository modes:
 - Default mode (no flags): Creates a temporary trial repository and simulates execution as if running against the current repository (github.repository context points to current repo)
 - --logical-repo REPO: Simulates execution against a specified repository (github.repository context points to REPO while actually running in a temporary trial repository)
-- --repo REPO: Runs directly in the specified repository (no simulation, workflows installed and executed in REPO)
+- --host-repo REPO (or --repo REPO): Uses the specified repository as the host for trial execution instead of creating a temporary one
 - --clone-repo REPO: Clones the specified repository's contents into the trial repository before execution (useful for testing against actual repository state)
 
 All workflows must support workflow_dispatch trigger to be used in trial mode.
@@ -222,10 +223,7 @@ func RunWorkflowTrials(ctx context.Context, workflowSpecs []string, opts TrialOp
 	if len(parsedSpecs) == 1 {
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Starting trial of workflow '%s' from '%s'", parsedSpecs[0].WorkflowName, parsedSpecs[0].RepoSlug)))
 	} else {
-		workflowNames := make([]string, len(parsedSpecs))
-		for i, spec := range parsedSpecs {
-			workflowNames[i] = spec.WorkflowName
-		}
+		workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 		joinedNames := strings.Join(workflowNames, ", ")
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Starting trial of %d workflows (%s)", len(parsedSpecs), joinedNames)))
 	}
@@ -505,7 +503,7 @@ func RunWorkflowTrials(ctx context.Context, workflowSpecs []string, opts TrialOp
 			workflowResults = append(workflowResults, result)
 
 			// Save individual trial file
-			sanitizedTargetRepo := repoutil.SanitizeForFilename(targetRepoForFilename)
+			sanitizedTargetRepo := stringutil.SanitizeForFilename(targetRepoForFilename)
 			individualFilename := fmt.Sprintf("trials/%s-%s.%s.json", parsedSpec.WorkflowName, sanitizedTargetRepo, dateTimeID)
 			if err := saveTrialResult(individualFilename, result, opts.Verbose); err != nil {
 				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to save individual trial result: %v", err)))
@@ -537,12 +535,9 @@ func RunWorkflowTrials(ctx context.Context, workflowSpecs []string, opts TrialOp
 
 		// Step 6: Save combined results for multi-workflow trials
 		if len(parsedSpecs) > 1 {
-			workflowNames := make([]string, len(parsedSpecs))
-			for i, spec := range parsedSpecs {
-				workflowNames[i] = spec.WorkflowName
-			}
+			workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 			workflowNamesStr := strings.Join(workflowNames, "-")
-			sanitizedTargetRepo := repoutil.SanitizeForFilename(targetRepoForFilename)
+			sanitizedTargetRepo := stringutil.SanitizeForFilename(targetRepoForFilename)
 			combinedFilename := fmt.Sprintf("trials/%s-%s.%s.json", workflowNamesStr, sanitizedTargetRepo, dateTimeID)
 			combinedResult := CombinedTrialResult{
 				WorkflowNames: workflowNames,
@@ -556,10 +551,7 @@ func RunWorkflowTrials(ctx context.Context, workflowSpecs []string, opts TrialOp
 		}
 
 		// Step 6.5: Copy trial results to host repository and commit them
-		workflowNames := make([]string, len(parsedSpecs))
-		for i, spec := range parsedSpecs {
-			workflowNames[i] = spec.WorkflowName
-		}
+		workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 		if err := copyTrialResultsToHostRepo(tempDir, dateTimeID, workflowNames, targetRepoForFilename, opts.Verbose); err != nil {
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to copy trial results to repository: %v", err)))
 		}
@@ -724,10 +716,7 @@ func showTrialConfirmation(parsedSpecs []*WorkflowSpec, logicalRepoSlug, cloneRe
 		if len(parsedSpecs) == 1 {
 			fmt.Fprintf(os.Stderr, console.FormatInfoMessage("  %d. Disable all workflows in cloned repository except %s\n"), stepNum, parsedSpecs[0].WorkflowName)
 		} else {
-			workflowNames := make([]string, len(parsedSpecs))
-			for i, spec := range parsedSpecs {
-				workflowNames[i] = spec.WorkflowName
-			}
+			workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 			fmt.Fprintf(os.Stderr, console.FormatInfoMessage("  %d. Disable all workflows in cloned repository except: %s\n"), stepNum, strings.Join(workflowNames, ", "))
 		}
 		stepNum++
@@ -737,10 +726,7 @@ func showTrialConfirmation(parsedSpecs []*WorkflowSpec, logicalRepoSlug, cloneRe
 	if len(parsedSpecs) == 1 {
 		fmt.Fprintf(os.Stderr, console.FormatInfoMessage("  %d. Install and compile %s\n"), stepNum, parsedSpecs[0].WorkflowName)
 	} else {
-		workflowNames := make([]string, len(parsedSpecs))
-		for i, spec := range parsedSpecs {
-			workflowNames[i] = spec.WorkflowName
-		}
+		workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 		fmt.Fprintf(os.Stderr, console.FormatInfoMessage("  %d. Install and compile: %s\n"), stepNum, strings.Join(workflowNames, ", "))
 	}
 	stepNum++
@@ -768,10 +754,7 @@ func showTrialConfirmation(parsedSpecs []*WorkflowSpec, logicalRepoSlug, cloneRe
 			fmt.Fprintf(os.Stderr, console.FormatInfoMessage("  %d. Execute %s\n"), stepNum, workflowName)
 		}
 	} else {
-		workflowNames := make([]string, len(parsedSpecs))
-		for i, spec := range parsedSpecs {
-			workflowNames[i] = spec.WorkflowName
-		}
+		workflowNames := sliceutil.Map(parsedSpecs, func(spec *WorkflowSpec) string { return spec.WorkflowName })
 		workflowList := strings.Join(workflowNames, ", ")
 
 		if repeatCount > 0 && autoMergePRs {
@@ -923,7 +906,7 @@ func copyTrialResultsToHostRepo(tempDir, dateTimeID string, workflowNames []stri
 	}
 
 	// Copy individual workflow result files
-	sanitizedTargetRepo := repoutil.SanitizeForFilename(targetRepoSlug)
+	sanitizedTargetRepo := stringutil.SanitizeForFilename(targetRepoSlug)
 	for _, workflowName := range workflowNames {
 		sourceFile := fmt.Sprintf("trials/%s-%s.%s.json", workflowName, sanitizedTargetRepo, dateTimeID)
 		destFile := filepath.Join(trialsDir, fmt.Sprintf("%s-%s.%s.json", workflowName, sanitizedTargetRepo, dateTimeID))

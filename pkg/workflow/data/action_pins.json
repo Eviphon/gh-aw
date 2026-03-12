@@ -45,10 +45,10 @@
       "version": "v8",
       "sha": "ed597411d8f924073f98dfc5c65a23a2325f34cd"
     },
-    "actions/setup-dotnet@v5.1.0": {
+    "actions/setup-dotnet@v5.2.0": {
       "repo": "actions/setup-dotnet",
-      "version": "v5.1.0",
-      "sha": "baa11fbfe1d6520db94683bd5c7a3818018e4309"
+      "version": "v5.2.0",
+      "sha": "c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7"
     },
     "actions/setup-go@v6.3.0": {
       "repo": "actions/setup-go",
@@ -64,6 +64,11 @@
       "repo": "actions/setup-node",
       "version": "v6.2.0",
       "sha": "6044e13b5dc448c55e2357c09f80417699197238"
+    },
+    "actions/setup-node@v6.3.0": {
+      "repo": "actions/setup-node",
+      "version": "v6.3.0",
+      "sha": "53b83947a5a98c8d113130e565377fae1a50d02f"
     },
     "actions/setup-python@v6.2.0": {
       "repo": "actions/setup-python",
@@ -100,50 +105,80 @@
       "version": "v6.19.2",
       "sha": "10e90e3645eae34f1e60eeb005ba3a3d33f178e8"
     },
+    "docker/build-push-action@v7": {
+      "repo": "docker/build-push-action",
+      "version": "v7",
+      "sha": "d08e5c354a6adb9ed34480a06d141179aa583294"
+    },
     "docker/login-action@v3.7.0": {
       "repo": "docker/login-action",
       "version": "v3.7.0",
       "sha": "c94ce9fb468520275223c153574b00df6fe4bcc9"
+    },
+    "docker/login-action@v4": {
+      "repo": "docker/login-action",
+      "version": "v4",
+      "sha": "b45d80f862d83dbcd57f89517bcf500b2ab88fb2"
     },
     "docker/metadata-action@v5.10.0": {
       "repo": "docker/metadata-action",
       "version": "v5.10.0",
       "sha": "c299e40c65443455700f0fdfc63efafe5b349051"
     },
+    "docker/metadata-action@v6": {
+      "repo": "docker/metadata-action",
+      "version": "v6",
+      "sha": "030e881283bb7a6894de51c315a6bfe6a94e05cf"
+    },
     "docker/setup-buildx-action@v3.12.0": {
       "repo": "docker/setup-buildx-action",
       "version": "v3.12.0",
       "sha": "8d2750c68a42422c14e847fe6c8ac0403b4cbd6f"
+    },
+    "docker/setup-buildx-action@v4": {
+      "repo": "docker/setup-buildx-action",
+      "version": "v4",
+      "sha": "4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd"
     },
     "erlef/setup-beam@v1.21.0": {
       "repo": "erlef/setup-beam",
       "version": "v1.21.0",
       "sha": "3580539ceec3dc05b0ed51e9e10b08eb7a7c2bb4"
     },
-    "github/codeql-action/upload-sarif@v4.32.4": {
+    "github/codeql-action/upload-sarif@v4.32.6": {
       "repo": "github/codeql-action/upload-sarif",
-      "version": "v4.32.4",
-      "sha": "e34fc2711fb7964ca6850c8a8382121f34745f3b"
+      "version": "v4.32.6",
+      "sha": "fb0994ef1c058010acf1efccff928b0a83b1ed54"
     },
     "github/stale-repos@v9.0.1": {
       "repo": "github/stale-repos",
       "version": "v9.0.1",
       "sha": "86c425f3b9ad6696e3f967c7f8fa5ccc1e59a7bc"
     },
+    "github/stale-repos@v9.0.2": {
+      "repo": "github/stale-repos",
+      "version": "v9.0.2",
+      "sha": "f592689f914c623d9fb51a0372f15d05f9849b09"
+    },
     "haskell-actions/setup@v2.10.3": {
       "repo": "haskell-actions/setup",
       "version": "v2.10.3",
       "sha": "9cd1b7bf3f36d5a3c3b17abc3545bfb5481912ea"
     },
-    "oven-sh/setup-bun@v2.1.2": {
-      "repo": "oven-sh/setup-bun",
-      "version": "v2.1.2",
-      "sha": "3d267786b128fe76c2f16a390aa2448b815359f3"
+    "microsoft/apm-action@v1": {
+      "repo": "microsoft/apm-action",
+      "version": "v1",
+      "sha": "92d6dc8046ad61b340662adefd2f997bf93d2987"
     },
-    "ruby/setup-ruby@v1.288.0": {
+    "oven-sh/setup-bun@v2.1.3": {
+      "repo": "oven-sh/setup-bun",
+      "version": "v2.1.3",
+      "sha": "ecf28ddc73e819eb6fa29df6b34ef8921c743461"
+    },
+    "ruby/setup-ruby@v1.290.0": {
       "repo": "ruby/setup-ruby",
-      "version": "v1.288.0",
-      "sha": "09a7688d3b55cf0e976497ff046b70949eeaccfd"
+      "version": "v1.290.0",
+      "sha": "6ca151fd1bfcfd6fe0c4eb6837eb0584d0134a0c"
     },
     "super-linter/super-linter@v8.5.0": {
       "repo": "super-linter/super-linter",

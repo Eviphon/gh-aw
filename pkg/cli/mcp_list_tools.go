@@ -9,6 +9,7 @@ import (
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/spf13/cobra"
 )
 
@@ -70,10 +71,7 @@ func ListToolsForMCP(workflowFile string, mcpServerName string, verbose bool) er
 		// Show available servers
 		if len(mcpConfigs) > 0 {
 			fmt.Fprintf(os.Stderr, "Available MCP servers: ")
-			serverNames := make([]string, len(mcpConfigs))
-			for i, config := range mcpConfigs {
-				serverNames[i] = config.Name
-			}
+			serverNames := sliceutil.Map(mcpConfigs, func(config parser.MCPServerConfig) string { return config.Name })
 			fmt.Fprintf(os.Stderr, "%s\n", strings.Join(serverNames, ", "))
 		}
 		return nil
@@ -212,12 +210,9 @@ func completeMCPListToolsArgs(cmd *cobra.Command, args []string, toComplete stri
 	// First argument: MCP server names are not easily discoverable without a workflow
 	// For now, provide no file completion but suggest common server names
 	if len(args) == 0 {
-		var filtered []string
-		for _, s := range commonMCPServerNames {
-			if toComplete == "" || strings.HasPrefix(s, toComplete) {
-				filtered = append(filtered, s)
-			}
-		}
+		filtered := sliceutil.Filter(commonMCPServerNames, func(s string) bool {
+			return toComplete == "" || strings.HasPrefix(s, toComplete)
+		})
 		return filtered, cobra.ShellCompDirectiveNoFileComp
 	}
 	// Second argument: complete workflow names

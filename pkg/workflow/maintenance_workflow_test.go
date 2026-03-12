@@ -257,6 +257,66 @@ func TestGenerateMaintenanceWorkflow_DeletesExistingFile(t *testing.T) {
 	}
 }
 
+func TestGenerateMaintenanceWorkflow_OperationJobConditions(t *testing.T) {
+	workflowDataList := []*WorkflowData{
+		{
+			Name: "test-workflow",
+			SafeOutputs: &SafeOutputsConfig{
+				CreateIssues: &CreateIssuesConfig{
+					Expires: 48,
+				},
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	err := GenerateMaintenanceWorkflow(workflowDataList, tmpDir, "v1.0.0", ActionModeDev, "", false)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(tmpDir, "agentics-maintenance.yml"))
+	if err != nil {
+		t.Fatalf("Expected maintenance workflow to be generated: %v", err)
+	}
+	yaml := string(content)
+
+	operationSkipCondition := `github.event_name != 'workflow_dispatch' || github.event.inputs.operation == ''`
+	operationRunCondition := `github.event_name == 'workflow_dispatch' && github.event.inputs.operation != ''`
+
+	const jobSectionSearchRange = 300
+	const runOpSectionSearchRange = 200
+
+	// Jobs that should be disabled when operation is set
+	disabledJobs := []string{"close-expired-entities:", "compile-workflows:", "zizmor-scan:", "secret-validation:"}
+	for _, job := range disabledJobs {
+		// Find the if: condition for each job
+		jobIdx := strings.Index(yaml, "\n  "+job)
+		if jobIdx == -1 {
+			t.Errorf("Job %q not found in generated workflow", job)
+			continue
+		}
+		// Check that the operation skip condition appears after the job name (within a reasonable range)
+		jobSection := yaml[jobIdx : jobIdx+jobSectionSearchRange]
+		if !strings.Contains(jobSection, operationSkipCondition) {
+			t.Errorf("Job %q is missing the operation skip condition %q in:\n%s", job, operationSkipCondition, jobSection)
+		}
+	}
+
+	// run_operation job should NOT have the skip condition but should have its own activation condition
+	runOpIdx := strings.Index(yaml, "\n  run_operation:")
+	if runOpIdx == -1 {
+		t.Errorf("Job run_operation not found in generated workflow")
+	} else {
+		runOpSection := yaml[runOpIdx : runOpIdx+runOpSectionSearchRange]
+		if strings.Contains(runOpSection, operationSkipCondition) {
+			t.Errorf("Job run_operation should NOT have the operation skip condition")
+		}
+		if !strings.Contains(runOpSection, operationRunCondition) {
+			t.Errorf("Job run_operation should have the activation condition %q", operationRunCondition)
+		}
+	}
+}
+
 func TestGenerateMaintenanceWorkflow_ActionTag(t *testing.T) {
 	workflowDataList := []*WorkflowData{
 		{
@@ -336,6 +396,125 @@ func TestGenerateMaintenanceWorkflow_ActionTag(t *testing.T) {
 		}
 		if !strings.Contains(string(content), "uses: ./actions/setup") {
 			t.Errorf("Expected local path in dev mode, got:\n%s", string(content))
+		}
+	})
+}
+
+func TestGenerateInstallCLISteps(t *testing.T) {
+	t.Run("dev mode generates Setup Go and Build gh-aw steps", func(t *testing.T) {
+		result := generateInstallCLISteps(ActionModeDev, "v1.0.0", "")
+		if !strings.Contains(result, "Setup Go") {
+			t.Errorf("Dev mode should include Setup Go step, got:\n%s", result)
+		}
+		if !strings.Contains(result, "make build") {
+			t.Errorf("Dev mode should include make build step, got:\n%s", result)
+		}
+		if strings.Contains(result, "setup-cli") {
+			t.Errorf("Dev mode should NOT use setup-cli action, got:\n%s", result)
+		}
+	})
+
+	t.Run("release mode generates setup-cli action step", func(t *testing.T) {
+		result := generateInstallCLISteps(ActionModeRelease, "v1.0.0", "")
+		if !strings.Contains(result, "github/gh-aw/actions/setup-cli@v1.0.0") {
+			t.Errorf("Release mode should use setup-cli action with version, got:\n%s", result)
+		}
+		if !strings.Contains(result, "version: v1.0.0") {
+			t.Errorf("Release mode should pass version to setup-cli, got:\n%s", result)
+		}
+		if strings.Contains(result, "make build") {
+			t.Errorf("Release mode should NOT build from source, got:\n%s", result)
+		}
+	})
+
+	t.Run("release mode uses actionTag over version", func(t *testing.T) {
+		result := generateInstallCLISteps(ActionModeRelease, "v1.0.0", "v2.0.0")
+		if !strings.Contains(result, "setup-cli@v2.0.0") {
+			t.Errorf("Release mode should use actionTag v2.0.0, got:\n%s", result)
+		}
+	})
+}
+
+func TestGetCLICmdPrefix(t *testing.T) {
+	if getCLICmdPrefix(ActionModeDev) != "./gh-aw" {
+		t.Errorf("Dev mode should use ./gh-aw prefix")
+	}
+	if getCLICmdPrefix(ActionModeRelease) != "gh aw" {
+		t.Errorf("Release mode should use 'gh aw' prefix")
+	}
+}
+
+func TestGenerateMaintenanceWorkflow_RunOperationCLICodegen(t *testing.T) {
+	workflowDataList := []*WorkflowData{
+		{
+			Name: "test-workflow",
+			SafeOutputs: &SafeOutputsConfig{
+				CreateIssues: &CreateIssuesConfig{
+					Expires: 48,
+				},
+			},
+		},
+	}
+
+	t.Run("dev mode run_operation uses build from source", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		err := GenerateMaintenanceWorkflow(workflowDataList, tmpDir, "v1.0.0", ActionModeDev, "", false)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, "agentics-maintenance.yml"))
+		if err != nil {
+			t.Fatalf("Expected maintenance workflow to be generated: %v", err)
+		}
+		yaml := string(content)
+		if !strings.Contains(yaml, "make build") {
+			t.Errorf("Dev mode run_operation should build from source, got:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "GH_AW_CMD_PREFIX: ./gh-aw") {
+			t.Errorf("Dev mode run_operation should use ./gh-aw prefix, got:\n%s", yaml)
+		}
+	})
+
+	t.Run("release mode run_operation uses setup-cli action not gh extension install", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		err := GenerateMaintenanceWorkflow(workflowDataList, tmpDir, "v1.0.0", ActionModeRelease, "v1.0.0", false)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, "agentics-maintenance.yml"))
+		if err != nil {
+			t.Fatalf("Expected maintenance workflow to be generated: %v", err)
+		}
+		yaml := string(content)
+		if strings.Contains(yaml, "gh extension install") {
+			t.Errorf("Release mode should NOT use gh extension install, got:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "github/gh-aw/actions/setup-cli@v1.0.0") {
+			t.Errorf("Release mode run_operation should use setup-cli action, got:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "GH_AW_CMD_PREFIX: gh aw") {
+			t.Errorf("Release mode run_operation should use 'gh aw' prefix, got:\n%s", yaml)
+		}
+	})
+
+	t.Run("dev mode compile_workflows uses same codegen as run_operation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		err := GenerateMaintenanceWorkflow(workflowDataList, tmpDir, "v1.0.0", ActionModeDev, "", false)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, "agentics-maintenance.yml"))
+		if err != nil {
+			t.Fatalf("Expected maintenance workflow to be generated: %v", err)
+		}
+		yaml := string(content)
+		// Both run_operation and compile_workflows should use the same setup-go version
+		// (both use GetActionPin, not hardcoded pins). Exactly 2 occurrences expected.
+		setupGoPin := GetActionPin("actions/setup-go")
+		occurrences := strings.Count(yaml, setupGoPin)
+		if occurrences != 2 {
+			t.Errorf("Expected exactly 2 occurrences of pinned setup-go ref %q (run_operation + compile_workflows), got %d in:\n%s",
+				setupGoPin, occurrences, yaml)
 		}
 	})
 }

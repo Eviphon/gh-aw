@@ -11,12 +11,21 @@
  * These tests require git to be installed and create temporary git repos.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
 import os from "os";
 import { generateGitPatch } from "./generate_git_patch.cjs";
+
+// generateGitPatch uses execGitSync from git_helpers.cjs which calls core.debug / core.error
+// as GitHub Actions globals. Provide a no-op mock so these tests work outside of Actions.
+global.core = {
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+};
 
 /**
  * Execute git command safely with args array
@@ -607,6 +616,90 @@ describe("git patch integration tests", () => {
       } finally {
         process.env.GITHUB_WORKSPACE = origWorkspace;
         process.env.DEFAULT_BRANCH = origDefaultBranch;
+      }
+    });
+
+    /**
+     * Sets GITHUB_WORKSPACE, DEFAULT_BRANCH, GITHUB_TOKEN, and GITHUB_SERVER_URL for
+     * a test, then restores the original values (or deletes them if they were unset).
+     * Returns a restore function to call in `finally`.
+     */
+    function setTestEnv(workspaceDir) {
+      const saved = {
+        GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE,
+        DEFAULT_BRANCH: process.env.DEFAULT_BRANCH,
+        GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+        GITHUB_SERVER_URL: process.env.GITHUB_SERVER_URL,
+      };
+      process.env.GITHUB_WORKSPACE = workspaceDir;
+      process.env.DEFAULT_BRANCH = "main";
+      process.env.GITHUB_TOKEN = "ghs_test_token_for_cleanup_verification";
+      process.env.GITHUB_SERVER_URL = "https://github.example.com";
+      return () => {
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = value;
+          }
+        }
+      };
+    }
+
+    it("should not write auth extraheader to git config during a successful fetch", async () => {
+      // Set up a feature branch, push a first commit, then add a second commit so
+      // incremental mode has something new to patch.
+      execGit(["checkout", "-b", "auth-cleanup-success"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "auth.txt"), "auth test\n");
+      execGit(["add", "auth.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Auth cleanup base commit"], { cwd: workingRepo });
+      execGit(["push", "-u", "origin", "auth-cleanup-success"], { cwd: workingRepo });
+
+      // Add a second commit that will become the incremental patch
+      fs.writeFileSync(path.join(workingRepo, "auth2.txt"), "auth test 2\n");
+      execGit(["add", "auth2.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Auth cleanup new commit"], { cwd: workingRepo });
+
+      // Delete the tracking ref so generateGitPatch has to re-fetch
+      execGit(["update-ref", "-d", "refs/remotes/origin/auth-cleanup-success"], { cwd: workingRepo });
+
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitPatch("auth-cleanup-success", "main", { mode: "incremental" });
+
+        expect(result.success).toBe(true);
+
+        // Verify the extraheader was never written to git config (auth is passed via env vars)
+        const configCheck = spawnSync("git", ["config", "--local", "--get", "http.https://github.example.com/.extraheader"], { cwd: workingRepo, encoding: "utf8" });
+        // exit status 1 means the key does not exist — that is what we want
+        expect(configCheck.status).toBe(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it("should not write auth extraheader to git config even when fetch fails", async () => {
+      // Create a local-only branch (fetch will fail because it's not on origin)
+      execGit(["checkout", "-b", "auth-cleanup-failure"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "auth-fail.txt"), "auth fail test\n");
+      execGit(["add", "auth-fail.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Auth cleanup failure test commit"], { cwd: workingRepo });
+      // Do NOT push — so the fetch fails
+
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitPatch("auth-cleanup-failure", "main", { mode: "incremental" });
+
+        // The fetch must fail since origin/auth-cleanup-failure doesn't exist
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("Cannot generate incremental patch");
+
+        // Verify the extraheader was never written to git config (auth is passed via env vars)
+        const configCheck = spawnSync("git", ["config", "--local", "--get", "http.https://github.example.com/.extraheader"], { cwd: workingRepo, encoding: "utf8" });
+        // exit status 1 means the key does not exist — that is what we want
+        expect(configCheck.status).toBe(1);
+      } finally {
+        restore();
       }
     });
 

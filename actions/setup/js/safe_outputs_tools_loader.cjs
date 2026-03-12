@@ -1,6 +1,7 @@
 // @ts-check
 
 const { getErrorMessage } = require("./error_helpers.cjs");
+const { validateTargetRepo, parseAllowedRepos, getDefaultTargetRepo } = require("./repo_helpers.cjs");
 
 const fs = require("fs");
 
@@ -55,6 +56,7 @@ function attachHandlers(tools, handlers) {
   const handlerMap = {
     create_pull_request: handlers.createPullRequestHandler,
     push_to_pull_request_branch: handlers.pushToPullRequestBranchHandler,
+    push_repo_memory: handlers.pushRepoMemoryHandler,
     upload_asset: handlers.uploadAssetHandler,
     create_project: handlers.createProjectHandler,
     add_comment: handlers.addCommentHandler,
@@ -100,6 +102,15 @@ function registerPredefinedTools(server, tools, config, registerTool, normalizeT
       if (tool.name === "create_pull_request" && config.create_pull_request) {
         const targetRepo = config.create_pull_request["target-repo"];
         if (targetRepo) {
+          // Validate the configured target-repo against the allowed-repos list
+          const allowedRepos = parseAllowedRepos(config.create_pull_request.allowed_repos);
+          if (allowedRepos.size > 0) {
+            const defaultRepo = getDefaultTargetRepo(config.create_pull_request);
+            const validation = validateTargetRepo(targetRepo, defaultRepo, allowedRepos);
+            if (!validation.valid) {
+              server.debug(`WARNING: SEC-005: ${validation.error}`);
+            }
+          }
           toolToRegister = JSON.parse(JSON.stringify(tool));
           toolToRegister.description += ` Note: This workflow is configured to create pull requests in '${targetRepo}'. You do not need to specify the repo parameter.`;
           if (toolToRegister.inputSchema && toolToRegister.inputSchema.properties && toolToRegister.inputSchema.properties.repo) {

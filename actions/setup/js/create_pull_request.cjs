@@ -16,12 +16,15 @@ const { addExpirationToFooter } = require("./ephemerals.cjs");
 const { generateWorkflowIdMarker } = require("./generate_footer.cjs");
 const { parseBoolTemplatable } = require("./templatable.cjs");
 const { generateFooterWithMessages } = require("./messages_footer.cjs");
+const { generateHistoryUrl } = require("./generate_history_link.cjs");
 const { normalizeBranchName } = require("./normalize_branch_name.cjs");
 const { pushExtraEmptyCommit } = require("./extra_empty_commit.cjs");
 const { createCheckoutManager } = require("./dynamic_checkout.cjs");
 const { getBaseBranch } = require("./get_base_branch.cjs");
 const { createAuthenticatedGitHubClient } = require("./handler_auth.cjs");
 const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
+const { checkForManifestFiles, checkForProtectedPaths } = require("./manifest_file_helpers.cjs");
+const { renderTemplate } = require("./messages_core.cjs");
 
 /**
  * @typedef {import('./types/handler-factory').HandlerFactoryFunction} HandlerFactoryFunction
@@ -149,7 +152,7 @@ async function main(config = {}) {
   }
 
   // Extract triggering issue number from context (for auto-linking PRs to issues)
-  const triggeringIssueNumber = context.payload?.issue?.number && !context.payload?.issue?.pull_request ? context.payload.issue.number : undefined;
+  const triggeringIssueNumber = typeof context !== "undefined" && context.payload?.issue?.number && !context.payload?.issue?.pull_request ? context.payload.issue.number : undefined;
 
   // Check if we're in staged mode
   const isStaged = process.env.GH_AW_SAFE_OUTPUTS_STAGED === "true";
@@ -416,6 +419,38 @@ async function main(config = {}) {
       core.info("Patch size validation passed");
     }
 
+    // Check for protected file modifications (e.g., package.json, go.mod, .github/ files, AGENTS.md, CLAUDE.md)
+    // By default, protected file modifications are refused to prevent supply chain attacks.
+    // Set protected-files: fallback-to-issue to push the branch but create a review issue
+    // instead of a pull request, so a human can carefully review the changes first.
+    // Set protected-files: allowed only when the workflow is explicitly designed to manage these files.
+    /** @type {{ manifestFilesFound: string[], protectedPathsFound: string[] } | null} */
+    let manifestProtectionFallback = null;
+    if (!isEmpty) {
+      const manifestFiles = Array.isArray(config.protected_files) ? config.protected_files : [];
+      const protectedPathPrefixes = Array.isArray(config.protected_path_prefixes) ? config.protected_path_prefixes : [];
+      // protected_files_policy is a string enum: "allowed" = allow, "fallback-to-issue" = fallback, "blocked" (default) = deny.
+      const policy = config.protected_files_policy;
+      const isAllowed = policy === "allowed";
+      const isFallback = policy === "fallback-to-issue";
+      if (!isAllowed) {
+        const { hasManifestFiles, manifestFilesFound } = checkForManifestFiles(patchContent, manifestFiles);
+        const { hasProtectedPaths, protectedPathsFound } = checkForProtectedPaths(patchContent, protectedPathPrefixes);
+        const allFound = [...manifestFilesFound, ...protectedPathsFound];
+        if (allFound.length > 0) {
+          if (isFallback) {
+            // Record for fallback-to-issue handling below; let patch application proceed
+            manifestProtectionFallback = { manifestFilesFound, protectedPathsFound };
+            core.warning(`Protected file protection triggered (fallback-to-issue): ${allFound.join(", ")}. Will create review issue instead of pull request.`);
+          } else {
+            const message = `Cannot create pull request: patch modifies protected files (${allFound.join(", ")}). Set protected-files: fallback-to-issue to create a review issue instead.`;
+            core.error(message);
+            return { success: false, error: message };
+          }
+        }
+      }
+    }
+
     if (isEmpty && !isStaged && !allowEmpty) {
       const message = "Patch file is empty - no changes to apply (noop operation)";
 
@@ -547,7 +582,14 @@ async function main(config = {}) {
     // Generate footer using messages template system (respects custom messages.footer config)
     // When footer is disabled, only add XML markers (no visible footer content)
     if (includeFooter) {
-      let footer = generateFooterWithMessages(workflowName, runUrl, workflowSource, workflowSourceURL, triggeringIssueNumber, triggeringPRNumber, triggeringDiscussionNumber).trimEnd();
+      const historyUrl = generateHistoryUrl({
+        owner: repoParts.owner,
+        repo: repoParts.repo,
+        itemType: "pull_request",
+        workflowId,
+        serverUrl: context.serverUrl,
+      });
+      let footer = generateFooterWithMessages(workflowName, runUrl, workflowSource, workflowSourceURL, triggeringIssueNumber, triggeringPRNumber, triggeringDiscussionNumber, historyUrl).trimEnd();
       footer = addExpirationToFooter(footer, expiresHours, "Pull Request");
       if (expiresHours > 0) {
         footer += "\n\n<!-- gh-aw-expires-type: pull-request -->";
@@ -883,6 +925,54 @@ ${patchPreview}`;
       }
     }
 
+    // Protected file protection – fallback-to-issue path:
+    // The patch has already been applied and pushed to the branch.  Instead of
+    // creating a pull request, we create a review issue that explains why the PR
+    // was not created and provides a PR intent URL so the reviewer can create it
+    // after manually inspecting the protected file changes.
+    if (manifestProtectionFallback) {
+      const allFound = [...manifestProtectionFallback.manifestFilesFound, ...manifestProtectionFallback.protectedPathsFound];
+      const githubServer = process.env.GITHUB_SERVER_URL || "https://github.com";
+      const encodedBase = baseBranch.split("/").map(encodeURIComponent).join("/");
+      const encodedHead = branchName.split("/").map(encodeURIComponent).join("/");
+      const createPrUrl = `${githubServer}/${repoParts.owner}/${repoParts.repo}/compare/${encodedBase}...${encodedHead}?expand=1&title=${encodeURIComponent(title)}`;
+
+      const templatePath = "/opt/gh-aw/prompts/manifest_protection_create_pr_fallback.md";
+      const template = fs.readFileSync(templatePath, "utf8");
+      const fallbackBody = renderTemplate(template, {
+        body,
+        files: allFound.map(f => `\`${f}\``).join(", "),
+        create_pr_url: createPrUrl,
+      });
+
+      try {
+        const { data: issue } = await githubClient.rest.issues.create({
+          owner: repoParts.owner,
+          repo: repoParts.repo,
+          title: title,
+          body: fallbackBody,
+          labels: mergeFallbackIssueLabels(labels),
+        });
+
+        core.info(`Created protected-file-protection review issue #${issue.number}: ${issue.html_url}`);
+
+        await updateActivationComment(github, context, core, issue.html_url, issue.number, "issue");
+
+        return {
+          success: true,
+          fallback_used: true,
+          issue_number: issue.number,
+          issue_url: issue.html_url,
+          branch_name: branchName,
+          repo: itemRepo,
+        };
+      } catch (issueError) {
+        const error = `Protected file protection: failed to create review issue. Error: ${issueError instanceof Error ? issueError.message : String(issueError)}`;
+        core.error(error);
+        return { success: false, error };
+      }
+    }
+
     // Try to create the pull request, with fallback to issue creation
     try {
       const { data: pullRequest } = await githubClient.rest.pulls.create({
@@ -978,16 +1068,61 @@ ${patchPreview}`;
       // Check if the error is the specific "GitHub actions is not permitted to create or approve pull requests" error
       if (errorMessage.includes("GitHub Actions is not permitted to create or approve pull requests")) {
         core.error("Permission error: GitHub Actions is not permitted to create or approve pull requests");
-        // Set output variable for conclusion job to handle
-        core.setOutput(
-          "error_message",
-          "GitHub Actions is not permitted to create or approve pull requests. Please enable 'Allow GitHub Actions to create and approve pull requests' in repository settings: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#preventing-github-actions-from-creating-or-approving-pull-requests"
-        );
-        return {
-          success: false,
-          error: errorMessage,
-          error_type: "permission_denied",
-        };
+
+        // Branch has already been pushed - create a fallback issue with a link to create the PR via GitHub UI
+        const githubServer = process.env.GITHUB_SERVER_URL || "https://github.com";
+        // Encode branch name path segments individually to preserve '/' while encoding other special characters
+        const encodedBase = baseBranch.split("/").map(encodeURIComponent).join("/");
+        const encodedHead = branchName.split("/").map(encodeURIComponent).join("/");
+        const createPrUrl = `${githubServer}/${repoParts.owner}/${repoParts.repo}/compare/${encodedBase}...${encodedHead}?expand=1&title=${encodeURIComponent(title)}`;
+
+        // Read patch content for preview
+        let patchPreview = "";
+        if (patchFilePath && fs.existsSync(patchFilePath)) {
+          const patchContent = fs.readFileSync(patchFilePath, "utf8");
+          patchPreview = generatePatchPreview(patchContent);
+        }
+
+        const fallbackBody =
+          `${body}\n\n---\n\n` +
+          `> [!NOTE]\n` +
+          `> This was originally intended as a pull request, but GitHub Actions is not permitted to create or approve pull requests in this repository.\n` +
+          `> The changes have been pushed to branch \`${branchName}\`.\n` +
+          `>\n` +
+          `> **[Click here to create the pull request](${createPrUrl})**\n\n` +
+          `To fix the permissions issue, go to **Settings** → **Actions** → **General** and enable **Allow GitHub Actions to create and approve pull requests**.` +
+          patchPreview;
+
+        try {
+          const { data: issue } = await githubClient.rest.issues.create({
+            owner: repoParts.owner,
+            repo: repoParts.repo,
+            title: title,
+            body: fallbackBody,
+            labels: mergeFallbackIssueLabels(labels),
+          });
+
+          core.info(`Created fallback issue #${issue.number}: ${issue.html_url}`);
+
+          await updateActivationComment(github, context, core, issue.html_url, issue.number, "issue");
+
+          return {
+            success: true,
+            fallback_used: true,
+            issue_number: issue.number,
+            issue_url: issue.html_url,
+            branch_name: branchName,
+            repo: itemRepo,
+          };
+        } catch (issueError) {
+          const error = `Failed to create pull request (permission denied) and failed to create fallback issue. PR error: ${errorMessage}. Issue error: ${issueError instanceof Error ? issueError.message : String(issueError)}`;
+          core.error(error);
+          return {
+            success: false,
+            error,
+            error_type: "permission_denied",
+          };
+        }
       }
 
       if (!fallbackAsIssue) {

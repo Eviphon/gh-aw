@@ -20,18 +20,28 @@ function debugLog(message) {
 }
 
 /**
- * Sanitize a branch name for use as a patch filename
- * Replaces path separators and special characters with dashes
- * @param {string} branchName - The branch name to sanitize
- * @returns {string} The sanitized branch name safe for use in a filename
+ * Sanitize a string for use as a patch filename component.
+ * Replaces path separators and special characters with dashes.
+ * @param {string} value - The value to sanitize
+ * @param {string} fallback - Fallback value when input is empty or nullish
+ * @returns {string} The sanitized string safe for use in a filename
  */
-function sanitizeBranchNameForPatch(branchName) {
-  if (!branchName) return "unknown";
-  return branchName
+function sanitizeForFilename(value, fallback) {
+  if (!value) return fallback;
+  return value
     .replace(/[/\\:*?"<>|]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-|-$/g, "")
     .toLowerCase();
+}
+
+/**
+ * Sanitize a branch name for use as a patch filename
+ * @param {string} branchName - The branch name to sanitize
+ * @returns {string} The sanitized branch name safe for use in a filename
+ */
+function sanitizeBranchNameForPatch(branchName) {
+  return sanitizeForFilename(branchName, "unknown");
 }
 
 /**
@@ -50,12 +60,7 @@ function getPatchPath(branchName) {
  * @returns {string} The sanitized slug safe for use in a filename
  */
 function sanitizeRepoSlugForPatch(repoSlug) {
-  if (!repoSlug) return "";
-  return repoSlug
-    .replace(/[/\\:*?"<>|]/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-|-$/g, "")
-    .toLowerCase();
+  return sanitizeForFilename(repoSlug, "");
 }
 
 /**
@@ -138,16 +143,36 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
           // We must explicitly fetch origin/branchName and fail if it doesn't exist.
 
           debugLog(`Strategy 1 (incremental): Fetching origin/${branchName}`);
+          // Configure git authentication using GITHUB_TOKEN and GITHUB_SERVER_URL.
+          // This ensures the fetch works on GitHub Enterprise Server (GHES) where
+          // the default credential helper may not be configured for the enterprise endpoint.
+          // SECURITY: The auth header is passed via GIT_CONFIG_* environment variables so it
+          // is never written to .git/config on disk. This prevents an attacker monitoring file
+          // changes from reading the secret.
+          const githubToken = process.env.GITHUB_TOKEN;
+          const githubServerUrl = process.env.GITHUB_SERVER_URL || "https://github.com";
+          const extraHeaderKey = `http.${githubServerUrl}/.extraheader`;
+
+          // Build environment for the fetch command with git config passed via env vars.
+          const fetchEnv = { ...process.env };
+          if (githubToken) {
+            const tokenBase64 = Buffer.from(`x-access-token:${githubToken}`).toString("base64");
+            fetchEnv.GIT_CONFIG_COUNT = "1";
+            fetchEnv.GIT_CONFIG_KEY_0 = extraHeaderKey;
+            fetchEnv.GIT_CONFIG_VALUE_0 = `Authorization: basic ${tokenBase64}`;
+            debugLog(`Strategy 1 (incremental): Configured git auth for ${githubServerUrl} via environment variables`);
+          }
+
           try {
             // Explicitly fetch origin/branchName to ensure we have the latest
             // Use "--" to prevent branch names starting with "-" from being interpreted as options
-            execGitSync(["fetch", "origin", "--", `${branchName}:refs/remotes/origin/${branchName}`], { cwd });
+            execGitSync(["fetch", "origin", "--", `${branchName}:refs/remotes/origin/${branchName}`], { cwd, env: fetchEnv });
             baseRef = `origin/${branchName}`;
             debugLog(`Strategy 1 (incremental): Successfully fetched, baseRef=${baseRef}`);
           } catch (fetchError) {
             // In incremental mode, we MUST have origin/branchName - no fallback
             debugLog(`Strategy 1 (incremental): Fetch failed - ${getErrorMessage(fetchError)}`);
-            errorMessage = `Cannot generate incremental patch: failed to fetch origin/${branchName}. ` + `This typically happens when the remote branch doesn't exist yet or was force-pushed. ` + `Error: ${getErrorMessage(fetchError)}`;
+            errorMessage = `Cannot generate incremental patch: failed to fetch origin/${branchName}. This typically happens when the remote branch doesn't exist yet or was force-pushed. Error: ${getErrorMessage(fetchError)}`;
             // Don't try other strategies in incremental mode
             return {
               success: false,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
 var firewallLogLog = logger.New("cli:firewall_log")
@@ -251,8 +252,12 @@ func parseFirewallLog(logPath string, verbose bool) (*FirewallAnalysis, error) {
 		// Determine if request was allowed or blocked
 		isAllowed := isRequestAllowed(entry.Decision, entry.Status)
 
-		// Extract domain (remove port)
+		// Extract domain - when domain is "-" (iptables-dropped traffic not visible to Squid),
+		// fall back to dest IP:port so blocked requests show their actual destination instead of "-"
 		domain := entry.Domain
+		if domain == "-" && entry.DestIPPort != "-" {
+			domain = entry.DestIPPort
+		}
 
 		if isAllowed {
 			analysis.AllowedRequests++
@@ -352,14 +357,11 @@ func analyzeFirewallLogs(runDir string, verbose bool) (*FirewallAnalysis, error)
 	}
 
 	// Filter for firewall log files (they typically have "access" or "firewall" in the name)
-	var firewallLogs []string
-	for _, file := range files {
+	firewallLogs := sliceutil.Filter(files, func(file string) bool {
 		basename := filepath.Base(file)
-		if strings.Contains(basename, "firewall") ||
-			(strings.Contains(basename, "access") && !strings.Contains(basename, "access-")) {
-			firewallLogs = append(firewallLogs, file)
-		}
-	}
+		return strings.Contains(basename, "firewall") ||
+			(strings.Contains(basename, "access") && !strings.Contains(basename, "access-"))
+	})
 
 	if len(firewallLogs) == 0 {
 		firewallLogLog.Print("No firewall logs found")

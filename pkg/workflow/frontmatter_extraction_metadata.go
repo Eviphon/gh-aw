@@ -241,12 +241,6 @@ func (c *Compiler) extractToolsStartupTimeout(tools map[string]any) (int, error)
 	return 0, nil
 }
 
-// extractMapFromFrontmatter is a generic helper to extract a map[string]any from frontmatter
-// This now uses the structured extraction helper for better error handling
-func extractMapFromFrontmatter(frontmatter map[string]any, key string) map[string]any {
-	return ExtractMapField(frontmatter, key)
-}
-
 // extractToolsFromFrontmatter extracts tools section from frontmatter map
 func extractToolsFromFrontmatter(frontmatter map[string]any) map[string]any {
 	return ExtractMapField(frontmatter, "tools")
@@ -363,4 +357,35 @@ func extractPluginsFromFrontmatter(frontmatter map[string]any) *PluginInfo {
 	}
 
 	return nil
+}
+
+// extractAPMDependenciesFromFrontmatter extracts APM (Agent Package Manager) dependency
+// configuration from frontmatter. Supports array format only:
+//   - Array format: ["org/pkg1", "org/pkg2"]
+//
+// Returns nil if no dependencies field is present or if the field contains no packages.
+func extractAPMDependenciesFromFrontmatter(frontmatter map[string]any) *APMDependenciesInfo {
+	value, exists := frontmatter["dependencies"]
+	if !exists {
+		return nil
+	}
+
+	depsArray, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+
+	var packages []string
+	for _, item := range depsArray {
+		if s, ok := item.(string); ok && s != "" {
+			packages = append(packages, s)
+		}
+	}
+
+	if len(packages) == 0 {
+		return nil
+	}
+
+	frontmatterMetadataLog.Printf("Extracted %d APM dependency packages from frontmatter", len(packages))
+	return &APMDependenciesInfo{Packages: packages}
 }

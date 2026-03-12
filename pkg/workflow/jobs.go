@@ -24,9 +24,11 @@ type Job struct {
 	TimeoutMinutes             int
 	Concurrency                string            // Job-level concurrency configuration
 	Environment                string            // Job environment configuration
+	Strategy                   string            // Job strategy configuration (matrix strategy)
 	Container                  string            // Job container configuration
 	Services                   string            // Job services configuration
 	Env                        map[string]string // Job-level environment variables
+	ContinueOnError            *bool             // continue-on-error flag for the job (nil means unset)
 	Steps                      []string
 	Needs                      []string // Job dependencies (needs clause)
 	Outputs                    map[string]string
@@ -286,6 +288,11 @@ func (jm *JobManager) renderJob(job *Job) string {
 		fmt.Fprintf(&yaml, "    %s\n", job.RunsOn)
 	}
 
+	// Add strategy section
+	if job.Strategy != "" {
+		fmt.Fprintf(&yaml, "    %s\n", strings.TrimRight(job.Strategy, "\n"))
+	}
+
 	// Add environment section
 	if job.Environment != "" {
 		fmt.Fprintf(&yaml, "    %s\n", job.Environment)
@@ -314,6 +321,11 @@ func (jm *JobManager) renderJob(job *Job) string {
 	// Add timeout-minutes if specified
 	if job.TimeoutMinutes > 0 {
 		fmt.Fprintf(&yaml, "    timeout-minutes: %d\n", job.TimeoutMinutes)
+	}
+
+	// Add continue-on-error only when explicitly set
+	if job.ContinueOnError != nil {
+		fmt.Fprintf(&yaml, "    continue-on-error: %t\n", *job.ContinueOnError)
 	}
 
 	// Add environment variables section
@@ -406,59 +418,4 @@ func (jm *JobManager) renderJob(job *Job) string {
 	yaml.WriteString("\n")
 
 	return yaml.String()
-}
-
-// GetTopologicalOrder returns jobs in topological order (dependencies before dependents)
-func (jm *JobManager) GetTopologicalOrder() ([]string, error) {
-	jobLog.Printf("Computing topological order for %d jobs", len(jm.jobs))
-	// First validate dependencies to ensure no cycles
-	if err := jm.ValidateDependencies(); err != nil {
-		return nil, err
-	}
-
-	// Track in-degree (number of incoming dependencies) for each job
-	inDegree := make(map[string]int)
-	for jobName := range jm.jobs {
-		inDegree[jobName] = 0
-	}
-
-	// Calculate in-degrees: count how many dependencies each job has
-	for _, job := range jm.jobs {
-		inDegree[job.Name] = len(job.Needs)
-	}
-
-	// Start with jobs that have no dependencies (in-degree = 0)
-	var queue []string
-	for jobName, degree := range inDegree {
-		if degree == 0 {
-			queue = append(queue, jobName)
-		}
-	}
-
-	result := make([]string, 0, len(jm.jobs))
-
-	// Process jobs in topological order
-	for len(queue) > 0 {
-		// Sort queue for consistent output
-		sort.Strings(queue)
-
-		// Take the first job from queue
-		currentJob := queue[0]
-		queue = queue[1:]
-		result = append(result, currentJob)
-
-		// For each job that depends on the current job, reduce its in-degree
-		for jobName, job := range jm.jobs {
-			for _, dep := range job.Needs {
-				if dep == currentJob {
-					inDegree[jobName]--
-					if inDegree[jobName] == 0 {
-						queue = append(queue, jobName)
-					}
-				}
-			}
-		}
-	}
-
-	return result, nil
 }

@@ -35,6 +35,8 @@ The `on:` section uses standard GitHub Actions syntax to define workflow trigger
 - `forks:` - Configure fork filtering for pull_request triggers
 - `skip-roles:` - Skip workflow execution for specific repository roles
 - `skip-bots:` - Skip workflow execution for specific GitHub actors
+- `github-token:` - Custom token for activation job reactions and status comments
+- `github-app:` - GitHub App for minting a short-lived token used by the activation job
 
 See [Trigger Events](/gh-aw/reference/triggers/) for complete documentation.
 
@@ -72,6 +74,23 @@ Use this field for internal tooling, sensitive automation, or workflows that dep
 
 > [!NOTE]
 > The `private:` field only blocks installation via `gh aw add`. It does not affect the visibility of the workflow file itself — that is controlled by your repository's access settings.
+
+### Resources (`resources:`)
+
+Declares additional workflow or action files to fetch alongside this workflow when running `gh aw add`. Use this field when the workflow depends on companion workflows or custom actions stored in the same directory.
+
+```yaml wrap
+resources:
+  - triage-issue.md          # companion workflow
+  - label-issue.md           # companion workflow
+  - shared/helper-action.yml # supporting GitHub Action
+```
+
+Entries are relative paths from the workflow's location in the source repository. GitHub Actions expression syntax (`${{`) is not allowed in resource paths.
+
+When a user runs `gh aw add` to install this workflow, each listed file is also downloaded and placed alongside the main workflow in the target repository. This ensures companion workflows and custom actions the main workflow depends on are available after installation.
+
+In addition to files explicitly listed in `resources:`, `gh aw add` automatically fetches workflows referenced in the [`dispatch-workflow`](/gh-aw/reference/safe-outputs/#workflow-dispatch-dispatch-workflow) safe output.
 
 ### Labels (`labels:`)
 
@@ -129,6 +148,26 @@ plugins:
 ```
 
 Each plugin repository must be specified in `org/repo` format. The compiler generates installation steps that run after the engine CLI is installed but before workflow execution begins.
+
+### APM Dependencies (`dependencies:`)
+
+Specifies [microsoft/apm](https://github.com/microsoft/apm) packages to install before workflow execution. When present, the compiler emits a step using the `microsoft/apm-action` action to install the listed packages.
+
+APM (Agent Package Manager) manages AI agent primitives such as skills, prompts, instructions, agents, and hooks. Packages can depend on other packages and APM resolves the full dependency tree.
+
+```yaml wrap
+dependencies:
+  - microsoft/apm-sample-package
+  - github/awesome-copilot/skills/review-and-refactor
+  - anthropics/skills/skills/frontend-design
+```
+
+Each entry is an APM package reference. Supported formats:
+
+- `owner/repo` — full APM package
+- `owner/repo/path/to/skill` — individual skill or primitive from a repository
+
+The compiler generates an `Install APM dependencies` step that runs after the engine CLI installation steps.
 
 ### Runtimes (`runtimes:`)
 
@@ -367,6 +406,9 @@ When strict mode rejects individual ecosystem domains, helpful error messages su
 
 - **Frontmatter**: `strict: true/false` (per-workflow)
 - **CLI flag**: `gh aw compile --strict` (all workflows, overrides frontmatter)
+
+> [!IMPORTANT]
+> Workflows compiled with `strict: false` cannot run on public repositories. The workflow fails at runtime with an error message prompting recompilation with strict mode.
 
 See [Network Permissions - Strict Mode Validation](/gh-aw/reference/network/#strict-mode-validation) for details on network validation and [CLI Commands](/gh-aw/setup/cli/#compile) for compilation options.
 
@@ -608,7 +650,7 @@ Post-execution steps run OUTSIDE the firewall sandbox. These steps execute with 
 
 ## Custom Jobs (`jobs:`)
 
-Define custom jobs that run before agentic execution. Supports complete GitHub Actions step specification.
+Define custom jobs that run before agentic execution.
 
 ```yaml wrap
 jobs:
@@ -625,6 +667,57 @@ jobs:
 The agentic execution job waits for all custom jobs to complete. Custom jobs can share data through artifacts or job outputs. See [Deterministic & Agentic Patterns](/gh-aw/guides/deterministic-agentic-patterns/) for multi-job workflows.
 
 Custom jobs run outside the firewall sandbox. These jobs execute with standard GitHub Actions security.
+
+### Supported Job-Level Fields
+
+The following job-level fields are supported in custom jobs:
+
+| Field | Description |
+|---|---|
+| `name` | Display name for the job |
+| `needs` | Jobs that must complete before this job runs |
+| `runs-on` | Runner label — string, array, or object form |
+| `if` | Conditional expression to control job execution |
+| `permissions` | GitHub token permissions for this job |
+| `outputs` | Values exposed to downstream jobs |
+| `env` | Environment variables available to all steps |
+| `timeout-minutes` | Maximum job duration (default: 360) |
+| `concurrency` | Concurrency group to prevent parallel runs |
+| `continue-on-error` | Allow the workflow to continue if this job fails |
+| `container` | Docker container to run steps in |
+| `services` | Service containers (e.g. databases) |
+| `steps` | List of steps — supports complete GitHub Actions step specification |
+| `uses` | Reusable workflow to call |
+| `with` | Input parameters for a reusable workflow |
+| `secrets` | Secrets passed to a reusable workflow |
+
+The `strategy` field (matrix builds) is not supported.
+
+`runs-on` accepts a string, an array of runner labels, or the object form:
+
+```yaml wrap
+jobs:
+  build:
+    runs-on:
+      group: my-runner-group
+      labels: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v6
+```
+
+The following example uses `timeout-minutes` and `env`:
+
+```yaml wrap
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v6
+      - run: npm ci && npm run build
+```
 
 ### Job Outputs
 

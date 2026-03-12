@@ -18,11 +18,22 @@ func generateFindings(processedRun ProcessedRun, metrics MetricsData, errors []E
 
 	// Failure findings
 	if run.Conclusion == "failure" {
+		desc := fmt.Sprintf("Workflow '%s' failed with %d error(s)", run.WorkflowName, metrics.ErrorCount)
+		if len(errors) > 0 {
+			// Append a truncated first error message to help quickly identify the root cause.
+			// Keep descriptions short enough to be useful in a key findings summary.
+			const maxErrMsgLen = 200
+			msg := errors[0].Message
+			if len(msg) > maxErrMsgLen {
+				msg = msg[:maxErrMsgLen] + "..."
+			}
+			desc += ": " + msg
+		}
 		findings = append(findings, Finding{
 			Category:    "error",
 			Severity:    "critical",
 			Title:       "Workflow Failed",
-			Description: fmt.Sprintf("Workflow '%s' failed with %d error(s)", run.WorkflowName, metrics.ErrorCount),
+			Description: desc,
 			Impact:      "Workflow did not complete successfully and may need intervention",
 		})
 	}
@@ -105,10 +116,10 @@ func generateFindings(processedRun ProcessedRun, metrics MetricsData, errors []E
 
 	// Missing tool findings
 	if len(processedRun.MissingTools) > 0 {
-		toolNames := make([]string, 0, min(3, len(processedRun.MissingTools)))
-		for i := 0; i < len(processedRun.MissingTools) && i < 3; i++ {
-			toolNames = append(toolNames, processedRun.MissingTools[i].Tool)
-		}
+		toolNames := sliceutil.Map(
+			processedRun.MissingTools[:min(3, len(processedRun.MissingTools))],
+			func(t MissingToolReport) string { return t.Tool },
+		)
 		desc := "Missing tools: " + strings.Join(toolNames, ", ")
 		if len(processedRun.MissingTools) > 3 {
 			desc += fmt.Sprintf(" (and %d more)", len(processedRun.MissingTools)-3)
@@ -175,7 +186,7 @@ func generateRecommendations(processedRun ProcessedRun, metrics MetricsData, fin
 			Priority: "high",
 			Action:   "Review error logs to identify root cause of failure",
 			Reason:   "Understanding failure causes helps prevent recurrence",
-			Example:  "Check the Errors section below for specific error messages and file locations",
+			Example:  "Check the errors field for specific error messages, or inspect the log files in logs_path",
 		})
 	}
 

@@ -120,6 +120,18 @@
         ]
       ]
     },
+    "resources": {
+      "type": "array",
+      "description": "Optional list of additional workflow or action files that should be fetched alongside this workflow when running 'gh aw add'. Entries are relative paths (from the same directory as this workflow in the source repository) to agentic workflow .md files or GitHub Actions .yml/.yaml files. GitHub Actions expression syntax (${{) is not allowed in resource paths.",
+      "items": {
+        "type": "string",
+        "description": "Relative path to a workflow .md file or action .yml/.yaml file. Must be a static path; GitHub Actions expression syntax (${{) is not allowed.",
+        "not": {
+          "pattern": "\\$\\{\\{"
+        }
+      },
+      "examples": [["triage-issue.md", "label-issue.md"], ["my-custom-action.yml"], ["shared/helper-action.yml", "close-stale.md"]]
+    },
     "inlined-imports": {
       "type": "boolean",
       "default": false,
@@ -1449,6 +1461,44 @@
               "type": "boolean",
               "description": "Whether to post status comments (started/completed) on the triggering item. When true, adds a comment with workflow run link and updates it on completion. When false or not specified, no status comments are posted. Must be explicitly set to true to enable status comments - there is no automatic bundling with ai-reaction.",
               "examples": [true, false]
+            },
+            "github-token": {
+              "type": "string",
+              "description": "Custom GitHub token to use for pre-activation reactions and activation status comments. When specified, overrides the default GITHUB_TOKEN for these operations.",
+              "examples": ["${{ secrets.MY_GITHUB_TOKEN }}"]
+            },
+            "github-app": {
+              "type": "object",
+              "description": "GitHub App configuration for minting a token used in pre-activation reactions and activation status comments. When configured, a GitHub App installation access token is minted and used instead of the default GITHUB_TOKEN.",
+              "properties": {
+                "app-id": {
+                  "type": "string",
+                  "description": "GitHub App ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App token."
+                },
+                "private-key": {
+                  "type": "string",
+                  "description": "GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to mint a GitHub App token."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "Optional owner of the GitHub App installation (defaults to current repository owner if not specified)"
+                },
+                "repositories": {
+                  "type": "array",
+                  "description": "Optional list of repositories to grant access to (defaults to current repository if not specified)",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": ["app-id", "private-key"],
+              "additionalProperties": false,
+              "examples": [
+                {
+                  "app-id": "${{ vars.APP_ID }}",
+                  "private-key": "${{ secrets.APP_PRIVATE_KEY }}"
+                }
+              ]
             }
           },
           "additionalProperties": false,
@@ -1776,9 +1826,8 @@
             "description": "Job timeout in minutes"
           },
           "strategy": {
-            "type": "object",
-            "description": "Matrix strategy for the job",
-            "additionalProperties": false
+            "$ref": "#/$defs/job_strategy",
+            "description": "Matrix strategy for the job. Defines multiple job configurations using matrix variables."
           },
           "continue-on-error": {
             "type": "boolean",
@@ -2990,7 +3039,7 @@
                   "description": "Guard policy: minimum required integrity level for repository access. Restricts the agent to users with at least the specified permission level.",
                   "enum": ["reader", "writer", "maintainer", "admin"]
                 },
-                "app": {
+                "github-app": {
                   "type": "object",
                   "description": "GitHub App configuration for token minting. When configured, a GitHub App installation access token is minted at workflow start and used instead of the default token. This token overrides any custom github-token setting and provides fine-grained permissions matching the agent job requirements.",
                   "properties": {
@@ -3611,6 +3660,10 @@
                   "type": "boolean",
                   "description": "Create orphaned branch if it doesn't exist (default: true)"
                 },
+                "wiki": {
+                  "type": "boolean",
+                  "description": "Use the GitHub Wiki git repository instead of the regular repository. When enabled, files are stored in and read from the wiki, and the agent will be instructed to follow GitHub Wiki markdown syntax (default: false)"
+                },
                 "allowed-extensions": {
                   "type": "array",
                   "items": {
@@ -3691,6 +3744,10 @@
                   "create-orphan": {
                     "type": "boolean",
                     "description": "Create orphaned branch if it doesn't exist (default: true)"
+                  },
+                  "wiki": {
+                    "type": "boolean",
+                    "description": "Use the GitHub Wiki git repository instead of the regular repository. When enabled, files are stored in and read from the wiki, and the agent will be instructed to follow GitHub Wiki markdown syntax (default: false)"
                   },
                   "allowed-extensions": {
                     "type": "array",
@@ -4024,10 +4081,9 @@
           "type": "array",
           "description": "List of allowed repositories for GitHub references (e.g., #123 or owner/repo#456). Use 'repo' to allow current repository. References to other repositories will be escaped with backticks. If not specified, all references are allowed.",
           "items": {
-            "type": "string",
-            "pattern": "^(repo|[a-zA-Z0-9][-a-zA-Z0-9]{0,38}/[a-zA-Z0-9._-]+)$"
+            "type": "string"
           },
-          "examples": [["repo"], ["repo", "octocat/hello-world"], ["microsoft/vscode", "microsoft/typescript"]]
+          "examples": [["repo"], ["repo", "octocat/hello-world"], ["microsoft/vscode", "microsoft/typescript"], ["repo", "${{ github.repository }}"]]
         },
         "create-issue": {
           "oneOf": [
@@ -5219,6 +5275,12 @@
                 "github-token-for-extra-empty-commit": {
                   "type": "string",
                   "description": "Token used to push an empty commit after PR creation to trigger CI events. Works around the GITHUB_TOKEN limitation where pushes don't trigger workflow runs. Defaults to the magic secret GH_AW_CI_TRIGGER_TOKEN if set in the repository. Use a secret expression (e.g. '${{ secrets.CI_TOKEN }}') for a custom token, or 'app' for GitHub App auth."
+                },
+                "protected-files": {
+                  "type": "string",
+                  "enum": ["blocked", "allowed", "fallback-to-issue"],
+                  "description": "Controls protected-file protection. blocked (default): hard-block any patch that modifies package manifests (e.g. package.json, go.mod), engine instruction files (e.g. AGENTS.md, CLAUDE.md) or .github/ files. allowed: allow all changes. fallback-to-issue: push the branch but create a review issue instead of a PR, so a human can review the manifest changes before merging.",
+                  "default": "blocked"
                 }
               },
               "additionalProperties": false,
@@ -6247,6 +6309,12 @@
                     "type": "string"
                   },
                   "description": "List of additional repositories in format 'owner/repo' that push to pull request branch can target. When specified, the agent can use a 'repo' field in the output to specify which repository to push to. The target repository (current or target-repo) is always implicitly allowed."
+                },
+                "protected-files": {
+                  "type": "string",
+                  "enum": ["blocked", "allowed", "fallback-to-issue"],
+                  "description": "Controls protected-file protection. blocked (default): hard-block any patch that modifies package manifests (e.g. package.json, go.mod), engine instruction files (e.g. AGENTS.md, CLAUDE.md) or .github/ files. allowed: allow all changes. fallback-to-issue: create a review issue instead of pushing to the PR branch, so a human can review the changes before applying.",
+                  "default": "blocked"
                 }
               },
               "additionalProperties": false
@@ -6689,7 +6757,7 @@
           "description": "GitHub token to use for safe output jobs. Typically a secret reference like ${{ secrets.GITHUB_TOKEN }} or ${{ secrets.CUSTOM_PAT }}",
           "examples": ["${{ secrets.GITHUB_TOKEN }}", "${{ secrets.CUSTOM_PAT }}", "${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}"]
         },
-        "app": {
+        "github-app": {
           "type": "object",
           "description": "GitHub App credentials for minting installation access tokens. When configured, a token will be generated using the app credentials and used for all safe output operations.",
           "properties": {
@@ -7472,6 +7540,16 @@
           }
         }
       ]
+    },
+    "dependencies": {
+      "description": "List of APM package references to install (e.g., 'org/repo' or 'org/repo/path/to/skill').",
+      "examples": [["microsoft/apm-sample-package", "acme/custom-tools"]],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+$",
+        "description": "APM package reference in the format 'org/repo' or 'org/repo/path/to/skill'"
+      }
     }
   },
   "additionalProperties": false,
@@ -7575,6 +7653,27 @@
           "description": "GitHub Actions expression that resolves to an integer at runtime"
         }
       ]
+    },
+    "job_strategy": {
+      "type": "object",
+      "description": "Matrix strategy for the job. Defines multiple job configurations using matrix variables.",
+      "properties": {
+        "matrix": {
+          "type": "object",
+          "description": "Matrix variables for creating job variants. Each key defines a dimension of the matrix, with values as arrays (e.g., {os: [ubuntu-latest, windows-latest]}). Use 'include' to add extra configurations and 'exclude' to remove specific combinations.",
+          "additionalProperties": true
+        },
+        "fail-fast": {
+          "type": "boolean",
+          "description": "If true, GitHub cancels all in-progress jobs if any matrix job fails. Defaults to true."
+        },
+        "max-parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of jobs to run simultaneously when using a matrix strategy."
+        }
+      },
+      "additionalProperties": false
     },
     "engine_config": {
       "examples": [
@@ -8056,10 +8155,10 @@
         },
         "github-token": {
           "type": "string",
-          "description": "GitHub token for authentication. Use ${{ secrets.MY_TOKEN }} to reference a secret. Mutually exclusive with app. Credentials are always removed after checkout (persist-credentials: false is enforced).",
+          "description": "GitHub token for authentication. Use ${{ secrets.MY_TOKEN }} to reference a secret. Mutually exclusive with github-app (and deprecated app). Credentials are always removed after checkout (persist-credentials: false is enforced).",
           "examples": ["${{ secrets.MY_PAT }}", "${{ secrets.CROSS_REPO_PAT }}"]
         },
-        "app": {
+        "github-app": {
           "type": "object",
           "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token.",
           "required": ["app-id", "private-key"],
@@ -8082,7 +8181,9 @@
             "repositories": {
               "type": "array",
               "description": "Repositories to grant the token access to. Defaults to the current repository. Use [\"*\"] for org-wide access.",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "examples": [["repo-a", "repo-b"], ["*"]]
             }
           },

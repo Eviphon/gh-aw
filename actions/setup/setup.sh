@@ -165,6 +165,7 @@ SAFE_INPUTS_FILES=(
   "error_codes.cjs"
   "mcp_enhanced_errors.cjs"
   "shim.cjs"
+  "safe-inputs-runner.cjs"
 )
 
 SAFE_INPUTS_COUNT=0
@@ -243,6 +244,7 @@ SAFE_OUTPUTS_FILES=(
   "missing_info_formatter.cjs"
   "sanitize_content_core.cjs"
   "markdown_code_region_balancer.cjs"
+  "temporary_id.cjs"
 )
 
 SAFE_OUTPUTS_COUNT=0

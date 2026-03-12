@@ -7,6 +7,7 @@ package parser
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -67,6 +68,7 @@ func newImportAccumulator() *importAccumulator {
 // safe-inputs, steps, runtimes, services, network, permissions, secret-masking, bots,
 // skip-roles, skip-bots, plugins, post-steps, labels, cache, and features.
 func (acc *importAccumulator) extractAllImportFields(content []byte, item importQueueItem, visited map[string]bool) error {
+	log.Printf("Extracting all import fields: path=%s, section=%s, inputs=%d, content_size=%d bytes", item.fullPath, item.sectionName, len(item.inputs), len(content))
 	// Extract tools from imported file
 	toolsContent, err := processIncludedFileWithVisited(item.fullPath, item.sectionName, true, visited)
 	if err != nil {
@@ -76,14 +78,7 @@ func (acc *importAccumulator) extractAllImportFields(content []byte, item import
 
 	// Track import path for runtime-import macro generation (only if no inputs).
 	// Imports with inputs must be inlined for compile-time substitution.
-	// Extract relative path from repository root (from .github/ onwards).
-	var importRelPath string
-	if idx := strings.Index(item.fullPath, "/.github/"); idx >= 0 {
-		importRelPath = item.fullPath[idx+1:] // +1 to skip the leading slash
-	} else {
-		// For files not under .github/, use the original import path
-		importRelPath = item.importPath
-	}
+	importRelPath := computeImportRelPath(item.fullPath, item.importPath)
 
 	if len(item.inputs) == 0 {
 		// No inputs - use runtime-import macro
@@ -112,6 +107,7 @@ func (acc *importAccumulator) extractAllImportFields(content []byte, item import
 	// Extract engines from imported file
 	engineContent, err := extractFrontmatterField(string(content), "engine", "")
 	if err == nil && engineContent != "" {
+		log.Printf("Found engine config in import: %s", item.fullPath)
 		acc.engines = append(acc.engines, engineContent)
 	}
 
@@ -281,6 +277,8 @@ func (acc *importAccumulator) extractAllImportFields(content []byte, item import
 // toImportsResult converts the accumulated state to a final ImportsResult.
 // topologicalOrder is the result from topologicalSortImports.
 func (acc *importAccumulator) toImportsResult(topologicalOrder []string) *ImportsResult {
+	log.Printf("Building ImportsResult: importedFiles=%d, importPaths=%d, engines=%d, bots=%d, plugins=%d, labels=%d",
+		len(topologicalOrder), len(acc.importPaths), len(acc.engines), len(acc.bots), len(acc.plugins), len(acc.labels))
 	return &ImportsResult{
 		MergedTools:         acc.toolsBuilder.String(),
 		MergedMCPServers:    acc.mcpServersBuilder.String(),
@@ -311,4 +309,26 @@ func (acc *importAccumulator) toImportsResult(topologicalOrder []string) *Import
 		RepositoryImports:   acc.repositoryImports,
 		ImportInputs:        acc.importInputs,
 	}
+}
+
+// computeImportRelPath returns the repository-root-relative path for a workflow file,
+// suitable for use in a {{#runtime-import ...}} macro.
+//
+// The rules are:
+//  1. If fullPath contains "/.github/" (as a path component), trim everything before
+//     and including the leading slash so the result starts with ".github/".
+//     LastIndex is used so that repos named ".github" (e.g. path
+//     "/root/.github/.github/workflows/file.md") resolve to the correct
+//     ".github/workflows/…" segment rather than the first occurrence.
+//  2. If fullPath already starts with ".github/" (a relative path) use it as-is.
+//  3. Otherwise fall back to importPath (the original import spec).
+func computeImportRelPath(fullPath, importPath string) string {
+	normalizedFullPath := filepath.ToSlash(fullPath)
+	if idx := strings.LastIndex(normalizedFullPath, "/.github/"); idx >= 0 {
+		return normalizedFullPath[idx+1:] // +1 to skip the leading slash
+	}
+	if strings.HasPrefix(normalizedFullPath, ".github/") {
+		return normalizedFullPath
+	}
+	return importPath
 }

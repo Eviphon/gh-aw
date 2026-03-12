@@ -2,7 +2,10 @@ package workflow
 
 import (
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/logger"
 )
+
+var mcpConfigTypesLog = logger.New("workflow:mcp_config_types")
 
 // WellKnownContainer represents a container configuration for a well-known command
 type WellKnownContainer struct {
@@ -24,7 +27,13 @@ func getWellKnownContainer(command string) *WellKnownContainer {
 		},
 	}
 
-	return wellKnownContainers[command]
+	container := wellKnownContainers[command]
+	if container != nil {
+		mcpConfigTypesLog.Printf("Found well-known container for command: command=%s, image=%s", command, container.Image)
+	} else {
+		mcpConfigTypesLog.Printf("No well-known container found for command: %s", command)
+	}
+	return container
 }
 
 // MCPConfigRenderer contains configuration options for rendering MCP config
@@ -94,9 +103,4 @@ func (m MapToolConfig) GetStringMap(key string) (map[string]string, bool) {
 		}
 	}
 	return nil, false
-}
-
-func (m MapToolConfig) GetAny(key string) (any, bool) {
-	value, exists := m[key]
-	return value, exists
 }

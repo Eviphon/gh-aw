@@ -172,6 +172,7 @@ func (c *Compiler) buildInitialWorkflowData(
 		ParsedTools:           NewTools(toolsResult.tools),
 		Runtimes:              toolsResult.runtimes,
 		PluginInfo:            toolsResult.pluginInfo,
+		APMDependencies:       toolsResult.apmDependencies,
 		MarkdownContent:       toolsResult.markdownContent,
 		AI:                    engineSetup.engineSetting,
 		EngineConfig:          engineSetup.engineConfig,
@@ -220,6 +221,7 @@ func (c *Compiler) extractYAMLSections(frontmatter map[string]any, workflowData 
 	orchestratorWorkflowLog.Print("Extracting YAML sections from frontmatter")
 
 	workflowData.On = c.extractTopLevelYAMLSection(frontmatter, "on")
+	workflowData.HasDispatchItemNumber = extractDispatchItemNumber(frontmatter)
 	workflowData.Permissions = c.extractPermissions(frontmatter)
 	workflowData.Network = c.extractTopLevelYAMLSection(frontmatter, "network")
 	workflowData.Concurrency = c.extractTopLevelYAMLSection(frontmatter, "concurrency")
@@ -235,6 +237,39 @@ func (c *Compiler) extractYAMLSections(frontmatter map[string]any, workflowData 
 	workflowData.Environment = c.extractTopLevelYAMLSection(frontmatter, "environment")
 	workflowData.Container = c.extractTopLevelYAMLSection(frontmatter, "container")
 	workflowData.Cache = c.extractTopLevelYAMLSection(frontmatter, "cache")
+}
+
+// extractDispatchItemNumber reports whether the frontmatter's on.workflow_dispatch
+// trigger exposes an item_number input. This is the signature produced by the label
+// trigger shorthand (e.g. "on: pull_request labeled my-label"). Reading the
+// structured map avoids re-parsing the rendered YAML string later.
+func extractDispatchItemNumber(frontmatter map[string]any) bool {
+	onVal, ok := frontmatter["on"]
+	if !ok {
+		return false
+	}
+	onMap, ok := onVal.(map[string]any)
+	if !ok {
+		return false
+	}
+	wdVal, ok := onMap["workflow_dispatch"]
+	if !ok {
+		return false
+	}
+	wdMap, ok := wdVal.(map[string]any)
+	if !ok {
+		return false
+	}
+	inputsVal, ok := wdMap["inputs"]
+	if !ok {
+		return false
+	}
+	inputsMap, ok := inputsVal.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = inputsMap["item_number"]
+	return ok
 }
 
 // processAndMergeSteps handles the merging of imported steps with main workflow steps
@@ -491,6 +526,8 @@ func (c *Compiler) extractAdditionalConfigurations(
 	workflowData.RateLimit = c.extractRateLimitConfig(frontmatter)
 	workflowData.SkipRoles = c.mergeSkipRoles(c.extractSkipRoles(frontmatter), importsResult.MergedSkipRoles)
 	workflowData.SkipBots = c.mergeSkipBots(c.extractSkipBots(frontmatter), importsResult.MergedSkipBots)
+	workflowData.ActivationGitHubToken = c.extractActivationGitHubToken(frontmatter)
+	workflowData.ActivationGitHubApp = c.extractActivationGitHubApp(frontmatter)
 
 	// Use the already extracted output configuration
 	workflowData.SafeOutputs = safeOutputs
@@ -543,8 +580,8 @@ func (c *Compiler) extractAdditionalConfigurations(
 	}
 
 	// Populate the App field if it's not set in the top-level workflow but is in an included config
-	if workflowData.SafeOutputs != nil && workflowData.SafeOutputs.App == nil && includedApp != nil {
-		workflowData.SafeOutputs.App = includedApp
+	if workflowData.SafeOutputs != nil && workflowData.SafeOutputs.GitHubApp == nil && includedApp != nil {
+		workflowData.SafeOutputs.GitHubApp = includedApp
 	}
 
 	// Merge safe-outputs types from imports

@@ -3,11 +3,9 @@ package workflow
 import (
 	"errors"
 	"strings"
-
-	"github.com/github/gh-aw/pkg/logger"
 )
 
-var toolsValidationLog = logger.New("workflow:tools_validation")
+var toolsValidationLog = newValidationLogger("tools")
 
 // validateBashToolConfig validates that bash tool configuration is explicit (not nil/anonymous)
 func validateBashToolConfig(tools *Tools, workflowName string) error {
@@ -25,50 +23,6 @@ func validateBashToolConfig(tools *Tools, workflowName string) error {
 	}
 
 	return nil
-}
-
-// isGitToolAllowed checks if git commands are allowed in bash tool configuration
-func isGitToolAllowed(tools *Tools) bool {
-	if tools == nil {
-		// No tools configured - defaults will be applied which include git for PR operations
-		return true
-	}
-
-	if tools.Bash == nil {
-		// No bash tool configured - defaults will be applied which include git for PR operations
-		return true
-	}
-
-	// If AllowedCommands is nil or empty, check which case it is:
-	// - nil AllowedCommands = bash: true (all commands allowed, including git)
-	// - empty slice = bash: false (explicitly disabled)
-	if tools.Bash.AllowedCommands == nil {
-		// bash: true - all commands allowed
-		return true
-	}
-
-	if len(tools.Bash.AllowedCommands) == 0 {
-		// bash: false or bash: [] - explicitly disabled or no commands
-		return false
-	}
-
-	// Check if git is in the allowed commands list
-	for _, cmd := range tools.Bash.AllowedCommands {
-		if cmd == "*" {
-			// Wildcard allows all commands
-			return true
-		}
-		if cmd == "git" {
-			// Exact match for git command
-			return true
-		}
-		// Check for git with wildcards: "git *", "git:*", "git checkout:*", etc.
-		if strings.HasPrefix(cmd, "git ") || strings.HasPrefix(cmd, "git:") {
-			return true
-		}
-	}
-
-	return false
 }
 
 // validateGitHubReadOnly validates that read-only: false is not set for the GitHub tool.
@@ -94,9 +48,9 @@ func validateGitHubToolConfig(tools *Tools, workflowName string) error {
 		return nil
 	}
 
-	if tools.GitHub.App != nil && tools.GitHub.GitHubToken != "" {
+	if tools.GitHub.GitHubApp != nil && tools.GitHub.GitHubToken != "" {
 		toolsValidationLog.Printf("Invalid GitHub tool configuration in workflow: %s", workflowName)
-		return errors.New("invalid GitHub tool configuration: 'tools.github.app' and 'tools.github.github-token' cannot both be set. Use one authentication method: either 'app' (GitHub App) or 'github-token' (personal access token)")
+		return errors.New("invalid GitHub tool configuration: 'tools.github.github-app' and 'tools.github.github-token' cannot both be set. Use one authentication method: either 'github-app' (GitHub App) or 'github-token' (personal access token)")
 	}
 
 	return nil

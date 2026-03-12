@@ -138,6 +138,38 @@ describe("safe_outputs_handlers", () => {
   });
 
   describe("uploadAssetHandler", () => {
+    it("should generate raw.githubusercontent.com URL for github.com", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+      process.env.GITHUB_SERVER_URL = "https://github.com";
+      process.env.GITHUB_REPOSITORY = "myorg/myrepo";
+
+      const testFile = path.join(testWorkspaceDir, "test.png");
+      fs.writeFileSync(testFile, "test content");
+
+      handlers.uploadAssetHandler({ path: testFile });
+
+      const entry = mockAppendSafeOutput.mock.calls[0][0];
+      expect(entry.url).toContain("raw.githubusercontent.com");
+      expect(entry.url).toContain("myorg/myrepo");
+    });
+
+    it("should generate enterprise URL for GitHub Enterprise Server", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+      process.env.GITHUB_SERVER_URL = "https://github.example.com";
+      process.env.GITHUB_REPOSITORY = "myorg/myrepo";
+
+      const testFile = path.join(testWorkspaceDir, "test2.png");
+      fs.writeFileSync(testFile, "test content");
+
+      handlers = createHandlers(mockServer, mockAppendSafeOutput);
+      handlers.uploadAssetHandler({ path: testFile });
+
+      const entry = mockAppendSafeOutput.mock.calls[0][0];
+      expect(entry.url).toContain("github.example.com");
+      expect(entry.url).toContain("/raw/");
+      expect(entry.url).not.toContain("raw.githubusercontent.com");
+    });
+
     it("should validate and process valid asset upload", () => {
       process.env.GH_AW_ASSETS_BRANCH = "test-branch";
 
@@ -415,6 +447,8 @@ describe("safe_outputs_handlers", () => {
       expect(handlers.uploadAssetHandler).toBeDefined();
       expect(handlers.createPullRequestHandler).toBeDefined();
       expect(handlers.pushToPullRequestBranchHandler).toBeDefined();
+      expect(handlers.pushRepoMemoryHandler).toBeDefined();
+      expect(handlers.addCommentHandler).toBeDefined();
     });
 
     it("should create handlers that return proper structure", () => {
@@ -425,6 +459,188 @@ describe("safe_outputs_handlers", () => {
       expect(Array.isArray(result.content)).toBe(true);
       expect(result.content[0]).toHaveProperty("type");
       expect(result.content[0]).toHaveProperty("text");
+    });
+  });
+
+  describe("addCommentHandler", () => {
+    it("should auto-generate a temporary_id when not provided", () => {
+      const result = handlers.addCommentHandler({ body: "Valid comment body" });
+
+      expect(result).toHaveProperty("content");
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(responseData.temporary_id).toBeDefined();
+      expect(responseData.temporary_id).toMatch(/^aw_[A-Za-z0-9]{3,12}$/);
+    });
+
+    it("should use the provided temporary_id when given", () => {
+      const result = handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_abc123" });
+
+      expect(result).toHaveProperty("content");
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(responseData.temporary_id).toBe("aw_abc123");
+    });
+
+    it("should return comment reference using temporary_id", () => {
+      const result = handlers.addCommentHandler({ body: "Valid comment body" });
+
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.comment).toBe(`#${responseData.temporary_id}`);
+    });
+
+    it("should record the temporary_id in the NDJSON entry", () => {
+      handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_test01" });
+
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "add_comment",
+          body: "Valid comment body",
+          temporary_id: "aw_test01",
+        })
+      );
+    });
+
+    it("should throw validation error for oversized comment body", () => {
+      const longBody = "a".repeat(70000);
+
+      expect(() => handlers.addCommentHandler({ body: longBody })).toThrow();
+    });
+  });
+
+  describe("pushRepoMemoryHandler", () => {
+    let memoryDir;
+
+    beforeEach(() => {
+      const testId = Math.random().toString(36).substring(7);
+      memoryDir = `/tmp/test-repo-memory-${testId}`;
+    });
+
+    afterEach(() => {
+      try {
+        if (fs.existsSync(memoryDir)) {
+          fs.rmSync(memoryDir, { recursive: true, force: true });
+        }
+      } catch (_error) {
+        // Ignore cleanup errors
+      }
+    });
+
+    function makeHandlersWithMemory(overrides = {}) {
+      const memConf = {
+        id: "default",
+        dir: memoryDir,
+        max_file_size: 1024, // 1 KB
+        max_patch_size: 2048, // 2 KB
+        max_file_count: 5,
+        ...overrides,
+      };
+      return createHandlers(mockServer, mockAppendSafeOutput, {
+        push_repo_memory: { memories: [memConf] },
+      });
+    }
+
+    it("should return success when no repo-memory is configured", () => {
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {});
+      const result = h.pushRepoMemoryHandler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("success");
+      expect(data.message).toContain("No repo-memory configured");
+    });
+
+    it("should return error for unknown memory_id", () => {
+      const h = makeHandlersWithMemory();
+      fs.mkdirSync(memoryDir, { recursive: true });
+      const result = h.pushRepoMemoryHandler({ memory_id: "nonexistent" });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("error");
+      expect(data.error).toContain("'nonexistent' not found");
+      expect(data.error).toContain("default");
+    });
+
+    it("should return success when memory directory does not exist yet", () => {
+      const h = makeHandlersWithMemory();
+      // memoryDir not created
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("success");
+      expect(data.message).toContain("does not exist yet");
+    });
+
+    it("should return success for valid files within limits", () => {
+      const h = makeHandlersWithMemory();
+      fs.mkdirSync(memoryDir, { recursive: true });
+      fs.writeFileSync(path.join(memoryDir, "state.json"), "x".repeat(100));
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("success");
+      expect(data.message).toContain("validation passed");
+    });
+
+    it("should return error when a file exceeds max_file_size", () => {
+      const h = makeHandlersWithMemory({ max_file_size: 100 });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      fs.writeFileSync(path.join(memoryDir, "big.json"), "x".repeat(200));
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("error");
+      expect(data.error).toContain("big.json");
+      expect(data.error).toContain("200 bytes");
+    });
+
+    it("should return error when file count exceeds max_file_count", () => {
+      const h = makeHandlersWithMemory({ max_file_count: 2 });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      for (let i = 0; i < 3; i++) {
+        fs.writeFileSync(path.join(memoryDir, `file${i}.json`), "x".repeat(10));
+      }
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("error");
+      expect(data.error).toContain("Too many files");
+      expect(data.error).toContain("3 files");
+    });
+
+    it("should return error when total size exceeds effective max_patch_size", () => {
+      // max_patch_size = 500 bytes, effective limit = floor(500 * 1.2) = 600 bytes
+      const h = makeHandlersWithMemory({ max_patch_size: 500, max_file_size: 1024 * 1024 });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      // Write two files totaling 650 bytes (above the 600 byte effective limit)
+      fs.writeFileSync(path.join(memoryDir, "a.json"), "x".repeat(350));
+      fs.writeFileSync(path.join(memoryDir, "b.json"), "x".repeat(300));
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("error");
+      expect(data.error).toContain("exceeds the allowed limit");
+      expect(data.error).toContain("push_repo_memory again");
+    });
+
+    it("should use 'default' memory_id when memory_id is not specified", () => {
+      const h = makeHandlersWithMemory();
+      fs.mkdirSync(memoryDir, { recursive: true });
+      fs.writeFileSync(path.join(memoryDir, "notes.md"), "hello");
+      const result = h.pushRepoMemoryHandler({}); // no memory_id
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("success");
+    });
+
+    it("should scan files recursively in subdirectories", () => {
+      // max_patch_size = 500 bytes, effective limit = 600 bytes
+      const h = makeHandlersWithMemory({ max_patch_size: 500, max_file_size: 1024 * 1024 });
+      const subDir = path.join(memoryDir, "history");
+      fs.mkdirSync(subDir, { recursive: true });
+      // Write a nested file that pushes total above effective limit
+      fs.writeFileSync(path.join(subDir, "log.jsonl"), "x".repeat(700));
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.result).toBe("error");
+      // The nested file path should appear correctly
+      expect(data.error).toContain("exceeds the allowed limit");
     });
   });
 });

@@ -12,6 +12,46 @@ import (
 
 var maintenanceLog = logger.New("workflow:maintenance_workflow")
 
+// generateInstallCLISteps generates YAML steps to install or build the gh-aw CLI.
+// In dev mode: builds from source using Setup Go + Build gh-aw (./gh-aw binary available)
+// In release mode: installs the released CLI via the setup-cli action (gh aw available)
+func generateInstallCLISteps(actionMode ActionMode, version string, actionTag string) string {
+	if actionMode == ActionModeDev {
+		return `      - name: Setup Go
+        uses: ` + GetActionPin("actions/setup-go") + `
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build gh-aw
+        run: make build
+
+`
+	}
+
+	// Release mode: use setup-cli action (consistent with copilot-setup-steps.yml)
+	cliTag := actionTag
+	if cliTag == "" {
+		cliTag = version
+	}
+	return `      - name: Install gh-aw
+        uses: github/gh-aw/actions/setup-cli@` + cliTag + `
+        with:
+          version: ` + cliTag + `
+
+`
+}
+
+// getCLICmdPrefix returns the CLI command prefix based on action mode.
+// In dev mode: "./gh-aw" (local binary built from source)
+// In release mode: "gh aw" (installed via gh extension)
+func getCLICmdPrefix(actionMode ActionMode) string {
+	if actionMode == ActionModeDev {
+		return "./gh-aw"
+	}
+	return "gh aw"
+}
+
 // generateMaintenanceCron generates a cron schedule based on the minimum expires value in days
 // Schedule runs at minimum required frequency to check expirations at appropriate intervals
 // Returns cron expression and description.
@@ -135,12 +175,24 @@ on:
   schedule:
     - cron: "` + cronSchedule + `"  # ` + scheduleDesc + ` (based on minimum expires: ` + strconv.Itoa(minExpiresDays) + ` days)
   workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Optional maintenance operation to run'
+        required: false
+        type: choice
+        default: ''
+        options:
+          - ''
+          - 'disable'
+          - 'enable'
+          - 'update'
+          - 'upgrade'
 
 permissions: {}
 
 jobs:
   close-expired-entities:
-    if: ${{ !github.event.repository.fork }}
+    if: ${{ !github.event.repository.fork && (github.event_name != 'workflow_dispatch' || github.event.inputs.operation == '') }}
     runs-on: ubuntu-slim
     permissions:
       discussions: write
@@ -212,6 +264,54 @@ jobs:
             await main();
 `)
 
+	// Add unified run_operation job for all dispatch operations
+	yaml.WriteString(`
+  run_operation:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation != '' && !github.event.repository.fork }}
+    runs-on: ubuntu-slim
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: ` + GetActionPin("actions/checkout") + `
+        with:
+          persist-credentials: false
+
+      - name: Setup Scripts
+        uses: ` + setupActionRef + `
+        with:
+          destination: /opt/gh-aw/actions
+
+      - name: Check admin/maintainer permissions
+        uses: ` + GetActionPin("actions/github-script") + `
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { setupGlobals } = require('/opt/gh-aw/actions/setup_globals.cjs');
+            setupGlobals(core, github, context, exec, io);
+            const { main } = require('/opt/gh-aw/actions/check_team_member.cjs');
+            await main();
+
+`)
+
+	yaml.WriteString(generateInstallCLISteps(actionMode, version, actionTag))
+	yaml.WriteString(`      - name: Run operation
+        uses: ` + GetActionPin("actions/github-script") + `
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_OPERATION: ${{ github.event.inputs.operation }}
+          GH_AW_CMD_PREFIX: ` + getCLICmdPrefix(actionMode) + `
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { setupGlobals } = require('/opt/gh-aw/actions/setup_globals.cjs');
+            setupGlobals(core, github, context, exec, io);
+            const { main } = require('/opt/gh-aw/actions/run_operation_update_upgrade.cjs');
+            await main();
+`)
+
 	// Add compile-workflows and zizmor-scan jobs only in dev mode
 	// These jobs are specific to the gh-aw repository and require go.mod, make build, etc.
 	// User repositories won't have these dependencies, so we skip them in release mode
@@ -219,7 +319,7 @@ jobs:
 		// Add compile-workflows job
 		yaml.WriteString(`
   compile-workflows:
-    if: ${{ !github.event.repository.fork }}
+    if: ${{ !github.event.repository.fork && (github.event_name != 'workflow_dispatch' || github.event.inputs.operation == '') }}
     runs-on: ubuntu-slim
     permissions:
       contents: read
@@ -235,19 +335,10 @@ jobs:
 
 `)
 
-		yaml.WriteString(`
-      - name: Setup Go
-        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build gh-aw
-        run: make build
-
-      - name: Compile workflows
+		yaml.WriteString(generateInstallCLISteps(actionMode, version, actionTag))
+		yaml.WriteString(`      - name: Compile workflows
         run: |
-          ./gh-aw compile --validate --verbose
+          ` + getCLICmdPrefix(actionMode) + ` compile --validate --verbose
           echo "✓ All workflows compiled successfully"
 
       - name: Setup Scripts
@@ -265,7 +356,7 @@ jobs:
             await main();
 
   zizmor-scan:
-    if: ${{ !github.event.repository.fork }}
+    if: ${{ !github.event.repository.fork && (github.event_name != 'workflow_dispatch' || github.event.inputs.operation == '') }}
     runs-on: ubuntu-slim
     needs: compile-workflows
     permissions:
@@ -289,7 +380,7 @@ jobs:
           echo "✓ Zizmor security scan completed"
 
   secret-validation:
-    if: ${{ !github.event.repository.fork }}
+    if: ${{ !github.event.repository.fork && (github.event_name != 'workflow_dispatch' || github.event.inputs.operation == '') }}
     runs-on: ubuntu-slim
     permissions:
       contents: read

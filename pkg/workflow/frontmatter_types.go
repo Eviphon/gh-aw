@@ -86,6 +86,13 @@ type PluginsConfig struct {
 	GitHubToken string   `json:"github-token,omitempty"` // Custom GitHub token for plugin installation
 }
 
+// APMDependenciesInfo encapsulates APM (Agent Package Manager) dependency configuration.
+// Supports both simple array format (list of package slugs) and object format with
+// an "apm" sub-key. When present, a microsoft/apm-action setup step is emitted.
+type APMDependenciesInfo struct {
+	Packages []string // APM package slugs to install (e.g., "org/package")
+}
+
 // RateLimitConfig represents rate limiting configuration for workflow triggers
 // Limits how many times a user can trigger a workflow within a time window
 type RateLimitConfig struct {
@@ -154,9 +161,10 @@ type FrontmatterConfig struct {
 	Cache       map[string]any `json:"cache,omitempty"`
 
 	// Import and inclusion
-	Imports        any  `json:"imports,omitempty"`         // Can be string or array
-	Include        any  `json:"include,omitempty"`         // Can be string or array
-	InlinedImports bool `json:"inlined-imports,omitempty"` // If true, inline all imports at compile time instead of using runtime-import macros
+	Imports        any      `json:"imports,omitempty"`         // Can be string or array
+	Include        any      `json:"include,omitempty"`         // Can be string or array
+	InlinedImports bool     `json:"inlined-imports,omitempty"` // If true, inline all imports at compile time instead of using runtime-import macros
+	Resources      []string `json:"resources,omitempty"`       // Additional workflow .md or action .yml files to fetch alongside this workflow
 
 	// Metadata
 	Metadata      map[string]string    `json:"metadata,omitempty"` // Custom metadata key-value pairs
@@ -170,47 +178,6 @@ type FrontmatterConfig struct {
 	// Can be a single CheckoutConfig object or an array of CheckoutConfig objects.
 	Checkout        any               `json:"checkout,omitempty"` // Raw value (object or array)
 	CheckoutConfigs []*CheckoutConfig `json:"-"`                  // Parsed checkout configs (not in JSON)
-}
-
-// unmarshalFromMap converts a value from a map[string]any to a destination variable
-// using JSON marshaling/unmarshaling for type conversion.
-// This provides cleaner error messages than manual type assertions.
-//
-// Parameters:
-//   - data: The map containing the configuration data
-//   - key: The key to extract from the map
-//   - dest: Pointer to the destination variable to unmarshal into (can be any type)
-//
-// Returns an error if:
-//   - The key doesn't exist in the map
-//   - The value cannot be marshaled to JSON
-//   - The JSON cannot be unmarshaled into the destination type
-//
-// Example:
-//
-//	var name string
-//	err := unmarshalFromMap(frontmatter, "name", &name)
-//
-//	var tools map[string]any
-//	err := unmarshalFromMap(frontmatter, "tools", &tools)
-func unmarshalFromMap(data map[string]any, key string, dest any) error {
-	value, exists := data[key]
-	if !exists {
-		return fmt.Errorf("key '%s' not found in frontmatter", key)
-	}
-
-	// Use JSON as intermediate format for type conversion
-	// This handles nested maps, arrays, and complex structures cleanly
-	jsonBytes, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("failed to marshal '%s' to JSON: %w", key, err)
-	}
-
-	if err := json.Unmarshal(jsonBytes, dest); err != nil {
-		return fmt.Errorf("failed to unmarshal '%s' into destination type: %w", key, err)
-	}
-
-	return nil
 }
 
 // ParseFrontmatterConfig creates a FrontmatterConfig from a raw frontmatter map

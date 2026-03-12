@@ -3,7 +3,6 @@ package workflow
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/console"
@@ -13,28 +12,6 @@ import (
 )
 
 var frontmatterLog = logger.New("workflow:frontmatter_extraction")
-
-// extractYAMLValue extracts a scalar value from the frontmatter map
-func (c *Compiler) extractYAMLValue(frontmatter map[string]any, key string) string {
-	if value, exists := frontmatter[key]; exists {
-		if str, ok := value.(string); ok {
-			return str
-		}
-		if num, ok := value.(int); ok {
-			return strconv.Itoa(num)
-		}
-		if num, ok := value.(int64); ok {
-			return strconv.FormatInt(num, 10)
-		}
-		if num, ok := value.(uint64); ok {
-			return strconv.FormatUint(num, 10)
-		}
-		if float, ok := value.(float64); ok {
-			return fmt.Sprintf("%.0f", float)
-		}
-	}
-	return ""
-}
 
 // indentYAMLLines adds indentation to all lines of a multi-line YAML string except the first
 func (c *Compiler) indentYAMLLines(yamlContent, indent string) string {
@@ -161,6 +138,7 @@ func (c *Compiler) commentOutProcessedFieldsInOnSection(yamlStr string, frontmat
 	inSkipBotsArray := false
 	inRolesArray := false
 	inBotsArray := false
+	inGitHubApp := false
 	currentSection := "" // Track which section we're in ("issues", "pull_request", "discussion", or "issue_comment")
 
 	for _, line := range lines {
@@ -272,6 +250,15 @@ func (c *Compiler) commentOutProcessedFieldsInOnSection(yamlStr string, frontmat
 			}
 		}
 
+		// Check if we're entering github-app object
+		if !inPullRequest && !inIssues && !inDiscussion && !inIssueComment && !inGitHubApp {
+			// Check both uncommented and commented forms
+			if (strings.HasPrefix(trimmedLine, "github-app:") && trimmedLine == "github-app:") ||
+				(strings.HasPrefix(trimmedLine, "# github-app:") && strings.Contains(trimmedLine, "pre-activation job")) {
+				inGitHubApp = true
+			}
+		}
+
 		// Check if we're leaving skip-if-match object (encountering another top-level field)
 		// Skip this check if we just entered skip-if-match on this line
 		if inSkipIfMatch && strings.TrimSpace(line) != "" &&
@@ -295,6 +282,19 @@ func (c *Compiler) commentOutProcessedFieldsInOnSection(yamlStr string, frontmat
 			// If this is a field at same level as skip-if-no-match (2 spaces) and not a comment, we're out of skip-if-no-match
 			if lineIndent == 2 && !strings.HasPrefix(trimmedLine, "#") {
 				inSkipIfNoMatch = false
+			}
+		}
+
+		// Check if we're leaving github-app object (encountering another top-level field)
+		// Skip this check if we just entered github-app on this line
+		if inGitHubApp && strings.TrimSpace(line) != "" &&
+			!strings.HasPrefix(trimmedLine, "github-app:") &&
+			!strings.HasPrefix(trimmedLine, "# github-app:") {
+			// Get the indentation of the current line
+			lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
+			// If this is a field at same level as github-app (2 spaces) and not a comment, we're out of github-app
+			if lineIndent == 2 && !strings.HasPrefix(trimmedLine, "#") {
+				inGitHubApp = false
 			}
 		}
 
@@ -410,6 +410,16 @@ func (c *Compiler) commentOutProcessedFieldsInOnSection(yamlStr string, frontmat
 			} else if strings.HasPrefix(trimmedLine, "reaction:") {
 				shouldComment = true
 				commentReason = " # Reaction processed as activation job step"
+			} else if strings.HasPrefix(trimmedLine, "github-token:") {
+				shouldComment = true
+				commentReason = " # GitHub token used for reactions and status comments in activation"
+			} else if strings.HasPrefix(trimmedLine, "github-app:") {
+				shouldComment = true
+				commentReason = " # GitHub App used to mint token for reactions and status comments in activation"
+			} else if inGitHubApp && isGitHubAppNestedField(trimmedLine) {
+				// Comment out nested fields and array items in github-app object
+				shouldComment = true
+				commentReason = ""
 			}
 		}
 
@@ -678,4 +688,17 @@ func (c *Compiler) extractCommandConfig(frontmatter map[string]any) (commandName
 	}
 
 	return nil, nil
+}
+
+// isGitHubAppNestedField returns true if the trimmed YAML line represents a known
+// nested field or array item inside an on.github-app object.
+func isGitHubAppNestedField(trimmedLine string) bool {
+	githubAppFields := []string{"app-id:", "private-key:", "owner:", "repositories:"}
+	for _, field := range githubAppFields {
+		if strings.HasPrefix(trimmedLine, field) {
+			return true
+		}
+	}
+	// Array items (repositories list)
+	return strings.HasPrefix(trimmedLine, "-")
 }

@@ -168,8 +168,40 @@ func TestAddRepoParameterIfNeededWildcardTargetRepo(t *testing.T) {
 	assert.Contains(t, repoProp["description"].(string), "Any repository can be targeted", "description should indicate any repo allowed")
 }
 
-// TestGenerateFilteredToolsJSONUpdateIssueWithWildcardTargetRepo tests that update_issue tool
-// is generated in tools.json when target-repo is "*" (wildcard).
+// TestAddRepoParameterIfNeededSpecificTargetRepoNoAllowedRepos tests that repo param is NOT added
+// for update_issue when target-repo is a specific repo but allowed-repos is empty.
+// The handler automatically routes to the configured target-repo, so the agent doesn't need to
+// specify repo in the tool schema.
+func TestAddRepoParameterIfNeededSpecificTargetRepoNoAllowedRepos(t *testing.T) {
+	tool := map[string]any{
+		"name": "update_issue",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"title": map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	safeOutputs := &SafeOutputsConfig{
+		UpdateIssues: &UpdateIssuesConfig{
+			UpdateEntityConfig: UpdateEntityConfig{
+				SafeOutputTargetConfig: SafeOutputTargetConfig{
+					TargetRepoSlug: "org/target-repo",
+				},
+			},
+		},
+	}
+
+	addRepoParameterIfNeeded(tool, "update_issue", safeOutputs)
+
+	inputSchema := tool["inputSchema"].(map[string]any)
+	properties := inputSchema["properties"].(map[string]any)
+
+	_, hasRepo := properties["repo"]
+	assert.False(t, hasRepo, "repo parameter should NOT be added when target-repo is specific and no allowed-repos")
+}
+
 func TestGenerateFilteredToolsJSONUpdateIssueWithWildcardTargetRepo(t *testing.T) {
 	data := &WorkflowData{
 		SafeOutputs: &SafeOutputsConfig{
@@ -264,6 +296,42 @@ func TestGenerateDispatchWorkflowToolEmptyInputs(t *testing.T) {
 
 	_, hasRequired := inputSchema["required"]
 	assert.False(t, hasRequired, "required field should not be present when no required inputs")
+}
+
+// TestGenerateDispatchWorkflowToolRequiredSorted tests that the required array is always sorted.
+// This ensures idempotent output regardless of map iteration order.
+func TestGenerateDispatchWorkflowToolRequiredSorted(t *testing.T) {
+	workflowInputs := map[string]any{
+		"tracker_issue": map[string]any{
+			"description": "Dashboard issue number to reference",
+			"type":        "string",
+			"required":    true,
+		},
+		"flag_key": map[string]any{
+			"description": "The LaunchDarkly flag key to clean up",
+			"type":        "string",
+			"required":    true,
+		},
+		"optional_param": map[string]any{
+			"description": "An optional parameter",
+			"type":        "string",
+			"required":    false,
+		},
+	}
+
+	// Run multiple times to catch non-determinism from map iteration
+	for i := range 10 {
+		tool := generateDispatchWorkflowTool("cleanup-worker", workflowInputs)
+
+		inputSchema, ok := tool["inputSchema"].(map[string]any)
+		require.True(t, ok, "inputSchema should be present (iteration %d)", i)
+
+		required, ok := inputSchema["required"].([]string)
+		require.True(t, ok, "required should be []string (iteration %d)", i)
+
+		assert.Equal(t, []string{"flag_key", "tracker_issue"}, required,
+			"required array should be sorted alphabetically (iteration %d)", i)
+	}
 }
 
 // TestCheckAllEnabledToolsPresentAllMatch tests that no error is returned when all enabled tools are present.
@@ -406,4 +474,77 @@ func TestGenerateFilteredToolsJSONSortsCustomJobs(t *testing.T) {
 	assert.Equal(t, "a_job", tools[0]["name"], "First tool should be a_job (alphabetical)")
 	assert.Equal(t, "m_job", tools[1]["name"], "Second tool should be m_job")
 	assert.Equal(t, "z_job", tools[2]["name"], "Third tool should be z_job")
+}
+
+// TestGenerateFilteredToolsJSONIncludesPushRepoMemoryWithRepoMemoryConfig tests that
+// push_repo_memory is included in the filtered tools when RepoMemoryConfig is present.
+func TestGenerateFilteredToolsJSONIncludesPushRepoMemoryWithRepoMemoryConfig(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{},
+		RepoMemoryConfig: &RepoMemoryConfig{
+			Memories: []RepoMemoryEntry{
+				{ID: "default", MaxFileSize: 10240, MaxPatchSize: 10240, MaxFileCount: 100},
+			},
+		},
+	}
+
+	result, err := generateFilteredToolsJSON(data, ".github/workflows/test.md")
+	require.NoError(t, err, "generateFilteredToolsJSON should not error")
+
+	var tools []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &tools), "Result should be valid JSON")
+
+	toolNames := make(map[string]bool)
+	for _, tool := range tools {
+		if name, ok := tool["name"].(string); ok {
+			toolNames[name] = true
+		}
+	}
+	assert.True(t, toolNames["push_repo_memory"], "push_repo_memory should be present when RepoMemoryConfig is set")
+}
+
+// TestGenerateFilteredToolsJSONExcludesPushRepoMemoryWithoutRepoMemoryConfig tests that
+// push_repo_memory is NOT included in the filtered tools when RepoMemoryConfig is absent.
+func TestGenerateFilteredToolsJSONExcludesPushRepoMemoryWithoutRepoMemoryConfig(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			CreateIssues: &CreateIssuesConfig{},
+		},
+		RepoMemoryConfig: nil,
+	}
+
+	result, err := generateFilteredToolsJSON(data, ".github/workflows/test.md")
+	require.NoError(t, err, "generateFilteredToolsJSON should not error")
+
+	var tools []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &tools), "Result should be valid JSON")
+
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		assert.NotEqual(t, "push_repo_memory", name, "push_repo_memory should NOT be present when RepoMemoryConfig is nil")
+	}
+}
+
+// TestGenerateFilteredToolsJSONExcludesPushRepoMemoryWithEmptyMemories tests that
+// push_repo_memory is NOT included when RepoMemoryConfig has an empty Memories slice.
+func TestGenerateFilteredToolsJSONExcludesPushRepoMemoryWithEmptyMemories(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			MissingData: &MissingDataConfig{},
+		},
+		RepoMemoryConfig: &RepoMemoryConfig{
+			Memories: []RepoMemoryEntry{},
+		},
+	}
+
+	result, err := generateFilteredToolsJSON(data, ".github/workflows/test.md")
+	require.NoError(t, err, "generateFilteredToolsJSON should not error")
+
+	var tools []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &tools), "Result should be valid JSON")
+
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		assert.NotEqual(t, "push_repo_memory", name, "push_repo_memory should NOT be present when Memories is empty")
+	}
 }

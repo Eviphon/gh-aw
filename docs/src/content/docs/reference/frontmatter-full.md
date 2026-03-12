@@ -682,6 +682,35 @@ on:
   # (optional)
   status-comment: true
 
+  # Custom GitHub token to use for pre-activation reactions and activation status
+  # comments. When specified, overrides the default GITHUB_TOKEN for these
+  # operations.
+  # (optional)
+  github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+  # GitHub App configuration for minting a token used in pre-activation reactions
+  # and activation status comments. When configured, a GitHub App installation
+  # access token is minted and used instead of the default GITHUB_TOKEN.
+  # (optional)
+  github-app:
+    # GitHub App ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App token.
+    app-id: "example-value"
+
+    # GitHub App private key (e.g., '${{ secrets.APP_PRIVATE_KEY }}'). Required to
+    # mint a GitHub App token.
+    private-key: "example-value"
+
+    # Optional owner of the GitHub App installation (defaults to current repository
+    # owner if not specified)
+    # (optional)
+    owner: "example-value"
+
+    # Optional list of repositories to grant access to (defaults to current repository
+    # if not specified)
+    # (optional)
+    repositories: []
+      # Array of strings
+
 # GitHub token permissions for the workflow. Controls what the GITHUB_TOKEN can
 # access during execution. Use the principle of least privilege - only grant the
 # minimum permissions needed.
@@ -760,6 +789,16 @@ permissions:
   # edit, review, and manage pull requests.
   # (optional)
   pull-requests: "read"
+
+  # Permission level for repository projects (read/write/none). Controls access to
+  # manage repository-level GitHub Projects boards.
+  # (optional)
+  repository-projects: "read"
+
+  # Permission level for organization projects (read/write/none). Controls access to
+  # manage organization-level GitHub Projects boards.
+  # (optional)
+  organization-projects: "read"
 
   # Permission level for security events (read/write/none). Controls access to view
   # and manage code scanning alerts and security findings.
@@ -1292,6 +1331,13 @@ engine:
   # Option 2: Maximum number of chat iterations per run as a string value
   max-turns: "example-value"
 
+  # Maximum number of continuations for multi-run autopilot mode. Default is 1
+  # (single run, no autopilot). Values greater than 1 enable --autopilot mode for
+  # the copilot engine with --max-autopilot-continues set to this value. Note: Only
+  # supported by the copilot engine.
+  # (optional)
+  max-continuations: 1
+
   # Agent job concurrency configuration. Defaults to single job per engine across
   # all workflows (group: 'gh-aw-{engine-id}'). Supports full GitHub Actions
   # concurrency syntax.
@@ -1422,7 +1468,7 @@ tools:
     args: []
       # Array of strings
 
-    # GitHub MCP server read-only mode (always enforced; false is not permitted)
+    # Enable read-only mode to restrict GitHub MCP server to read-only operations only
     # (optional)
     read-only: true
 
@@ -1449,12 +1495,30 @@ tools:
     mounts: []
       # Array of Mount specification in format 'host:container:mode'
 
+    # Guard policy: repository access configuration. Restricts which repositories the
+    # agent can access. Use 'all' to allow all repos or an array of 'owner/repo'
+    # strings.
+    # (optional)
+    # This field supports multiple formats (oneOf):
+
+    # Option 1: Allow access to all repositories
+    repos: "all"
+
+    # Option 2: Allow access to specific repositories
+    repos: []
+      # Array items: Repository slug in the format 'owner/repo'
+
+    # Guard policy: minimum required integrity level for repository access. Restricts
+    # the agent to users with at least the specified permission level.
+    # (optional)
+    min-integrity: "reader"
+
     # GitHub App configuration for token minting. When configured, a GitHub App
     # installation access token is minted at workflow start and used instead of the
     # default token. This token overrides any custom github-token setting and provides
     # fine-grained permissions matching the agent job requirements.
     # (optional)
-    app:
+    github-app:
       # GitHub App ID (e.g., '${{ vars.APP_ID }}'). Required to mint a GitHub App token.
       app-id: "example-value"
 
@@ -1628,7 +1692,7 @@ tools:
   serena: null
 
   # Option 2: Short syntax: array of language identifiers to enable (e.g., ["go",
-  # "typescript"])
+  # "typescript"]). Note: rust does not generate a runtime setup step.
   serena: []
     # Array items: string
 
@@ -1640,8 +1704,7 @@ tools:
     # (optional)
     version: null
 
-    # Serena execution mode ('docker' is the only supported mode, runs in
-    # container)
+    # Serena execution mode (only 'docker' is supported, runs in container)
     # (optional)
     mode: "docker"
 
@@ -1718,7 +1781,8 @@ tools:
         version: null
 
       # Configuration for Rust language support in Serena code analysis. Enables
-      # Rust-specific parsing, linting, and security checks.
+      # Rust-specific parsing, linting, and security checks. Note: rust does not
+      # generate a runtime setup step in GitHub Actions.
       # (optional)
       # This field supports multiple formats (oneOf):
 
@@ -1800,6 +1864,12 @@ tools:
     # Create orphaned branch if it doesn't exist (default: true)
     # (optional)
     create-orphan: true
+
+    # Use the GitHub Wiki git repository instead of the regular repository. When enabled,
+    # files are stored in and read from the wiki, and the agent will be instructed to
+    # follow GitHub Wiki markdown syntax (default: false)
+    # (optional)
+    wiki: false
 
     # List of allowed file extensions (e.g., [".json", ".txt"]). Default: [".json",
     # ".jsonl", ".txt", ".md", ".csv"]
@@ -1987,6 +2057,11 @@ safe-outputs:
     # metadata) are still included for searchability. Defaults to true.
     # (optional)
     footer: true
+
+    # GitHub token to use for this specific output type. Overrides global github-token
+    # if specified.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
 
   # Option 2: Enable issue creation with default configuration
   create-issue: null
@@ -2398,6 +2473,11 @@ safe-outputs:
     # Option 3: Set to false to explicitly disable expiration
     expires: true
 
+    # GitHub token to use for this specific output type. Overrides global github-token
+    # if specified.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
+
   # Option 2: Enable discussion creation with default configuration
   create-discussion: null
 
@@ -2701,11 +2781,35 @@ safe-outputs:
       # Array of strings
 
     # Controls whether the workflow requests discussions:write permission for
-    # add-comment. Default: true (includes discussions:write). Set to false if your
-    # GitHub App lacks Discussions permission to prevent 422 errors during token
-    # generation.
+    # add-comment and includes discussions in the event trigger condition. Default:
+    # true (includes discussions:write). Set to false if your GitHub App lacks
+    # Discussions permission to prevent 422 errors during token generation.
     # (optional)
     discussions: true
+
+    # Controls whether the workflow requests issues:write permission for add-comment
+    # and includes issues in the event trigger condition. Default: true (includes
+    # issues:write). Set to false to disable issue commenting.
+    # (optional)
+    issues: true
+
+    # Controls whether the workflow requests pull-requests:write permission for
+    # add-comment and includes pull requests in the event trigger condition. Default:
+    # true (includes pull-requests:write). Set to false to disable pull request
+    # commenting.
+    # (optional)
+    pull-requests: true
+
+    # Controls whether AI-generated footer is added to the comment. When false, the
+    # visible footer content is omitted but XML markers (workflow-id, metadata) are
+    # still included for searchability. Defaults to true.
+    # (optional)
+    footer: true
+
+    # GitHub token to use for this specific output type. Overrides global github-token
+    # if specified.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
 
   # Option 2: Enable issue comment creation with default configuration
   add-comment: null
@@ -2835,6 +2939,14 @@ safe-outputs:
     # removes the issues:write permission requirement.
     # (optional)
     fallback-as-issue: true
+
+    # Token used to push an empty commit after PR creation to trigger CI events. Works
+    # around the GITHUB_TOKEN limitation where pushes don't trigger workflow runs.
+    # Defaults to the magic secret GH_AW_CI_TRIGGER_TOKEN if set in the repository.
+    # Use a secret expression (e.g. '${{ secrets.CI_TOKEN }}') for a custom token, or
+    # 'app' for GitHub App auth.
+    # (optional)
+    github-token-for-extra-empty-commit: "example-value"
 
   # Option 2: Enable pull request creation with default configuration
   create-pull-request: null
@@ -3040,6 +3152,19 @@ safe-outputs:
     # (optional)
     github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+    # Target repository in format 'owner/repo' for cross-repository code scanning
+    # alert creation. Takes precedence over trial target repo settings.
+    # (optional)
+    target-repo: "example-value"
+
+    # List of additional repositories in format 'owner/repo' that code scanning alerts
+    # can be created in. When specified, the agent can use a 'repo' field in the
+    # output to specify which repository to create the alert in. The target repository
+    # (current or target-repo) is always implicitly allowed.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
+
   # Option 2: Enable code scanning alert creation with default configuration
   # (unlimited findings)
   create-code-scanning-alert: null
@@ -3179,6 +3304,14 @@ safe-outputs:
     # if specified.
     # (optional)
     github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+    # List of additional repositories in format 'owner/repo' that labels can be
+    # removed from. When specified, the agent can use a 'repo' field in the output to
+    # specify which repository to remove labels from. The target repository (current
+    # or target-repo) is always implicitly allowed.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
 
   # Enable AI agents to request reviews from users or teams on pull requests based
   # on code changes or expertise matching.
@@ -3409,6 +3542,12 @@ safe-outputs:
     # (optional)
     github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+    # List of allowed repositories in format 'owner/repo' for cross-repository user
+    # assignment operations. Use with 'repo' field in tool calls.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
+
   # Enable AI agents to unassign users from issues or pull requests. Useful for
   # reassigning work or removing users from issues.
   # (optional)
@@ -3568,6 +3707,19 @@ safe-outputs:
     # (optional)
     title-prefix: "example-value"
 
+    # List of additional repositories in format 'owner/repo' that issues can be
+    # updated in. When specified, the agent can use a 'repo' field in the output to
+    # specify which repository to update the issue in. The target repository (current
+    # or target-repo) is always implicitly allowed.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
+
+    # GitHub token to use for this specific output type. Overrides global github-token
+    # if specified.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
+
   # Option 2: Enable issue updating with default configuration
   update-issue: null
 
@@ -3692,6 +3844,27 @@ safe-outputs:
     # (optional)
     staged: true
 
+    # Token used to push an empty commit after pushing changes to trigger CI events.
+    # Works around the GITHUB_TOKEN limitation where pushes don't trigger workflow
+    # runs. Defaults to the magic secret GH_AW_CI_TRIGGER_TOKEN if set in the
+    # repository. Use a secret expression (e.g. '${{ secrets.CI_TOKEN }}') for a
+    # custom token, or 'app' for GitHub App auth.
+    # (optional)
+    github-token-for-extra-empty-commit: "example-value"
+
+    # Target repository in format 'owner/repo' for cross-repository push to pull
+    # request branch. Takes precedence over trial target repo settings.
+    # (optional)
+    target-repo: "example-value"
+
+    # List of additional repositories in format 'owner/repo' that push to pull request
+    # branch can target. When specified, the agent can use a 'repo' field in the
+    # output to specify which repository to push to. The target repository (current or
+    # target-repo) is always implicitly allowed.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
+
   # Enable AI agents to minimize (hide) comments on issues or pull requests based on
   # relevance, spam detection, or moderation rules.
   # (optional)
@@ -3731,6 +3904,57 @@ safe-outputs:
     # generation.
     # (optional)
     discussions: true
+
+  # Enable AI agents to set or clear the type of GitHub issues. Use an empty string
+  # to clear the current type.
+  # (optional)
+  # This field supports multiple formats (oneOf):
+
+  # Option 1: Null configuration allows setting any issue type
+  set-issue-type: null
+
+  # Option 2: Configuration for setting the type of GitHub issues from agentic
+  # workflow output
+  set-issue-type:
+    # Optional list of allowed issue type names (e.g. 'Bug', 'Feature'). If omitted,
+    # any type is allowed. Empty string is always allowed to clear the type.
+    # (optional)
+    allowed: []
+      # Array of strings
+
+    # Optional maximum number of set-issue-type operations (default: 5). Supports
+    # integer or GitHub Actions expression (e.g. '${{ inputs.max }}').
+    # (optional)
+    # This field supports multiple formats (oneOf):
+
+    # Option 1: integer
+    max: 1
+
+    # Option 2: GitHub Actions expression that resolves to an integer at runtime
+    max: "example-value"
+
+    # Target for issue type: 'triggering' (default), '*' (any issue), or explicit
+    # issue number
+    # (optional)
+    target: "example-value"
+
+    # Target repository in format 'owner/repo' for cross-repository issue type
+    # setting. Takes precedence over trial target repo settings.
+    # (optional)
+    target-repo: "example-value"
+
+    # List of additional repositories in format 'owner/repo' where issue types can be
+    # set. When specified, the agent can use a 'repo' field in the output to specify
+    # which repository to target. The target repository (current or target-repo) is
+    # always implicitly allowed.
+    # (optional)
+    allowed-repos: []
+      # Array of strings
+
+    # GitHub token to use for this specific output type. Overrides global github-token
+    # if specified.
+    # (optional)
+    github-token: "${{ secrets.GITHUB_TOKEN }}"
 
   # Dispatch workflow_dispatch events to other workflows. Used by orchestrators to
   # delegate work to worker workflows with controlled maximum dispatch count.
@@ -3981,7 +4205,7 @@ safe-outputs:
   # a token will be generated using the app credentials and used for all safe output
   # operations.
   # (optional)
-  app:
+  github-app:
     # GitHub App ID. Should reference a variable (e.g., ${{ vars.APP_ID }}).
     app-id: "example-value"
 
@@ -4040,6 +4264,11 @@ safe-outputs:
     # Array of extra job steps to run after detection
     # (optional)
     steps: []
+
+    # Runner specification for the detection job. Overrides agent.runs-on for the
+    # detection job only. Defaults to agent.runs-on.
+    # (optional)
+    runs-on: "example-value"
 
   # Custom safe-output jobs that can be executed based on agentic workflow output.
   # Job names containing dashes will be automatically normalized to underscores
@@ -4126,6 +4355,24 @@ safe-outputs:
     # (optional)
     agent-failure-comment: "example-value"
 
+    # Custom message template for pull request creation link appended to the
+    # activation comment. Available placeholders: {item_number}, {item_url}. Default:
+    # 'Pull request created: [#{item_number}]({item_url})'
+    # (optional)
+    pull-request-created: "example-value"
+
+    # Custom message template for issue creation link appended to the activation
+    # comment. Available placeholders: {item_number}, {item_url}. Default: 'Issue
+    # created: [#{item_number}]({item_url})'
+    # (optional)
+    issue-created: "example-value"
+
+    # Custom message template for commit push link appended to the activation comment.
+    # Available placeholders: {commit_sha}, {short_sha}, {commit_url}. Default:
+    # 'Commit pushed: [`{short_sha}`]({commit_url})'
+    # (optional)
+    commit-pushed: "example-value"
+
     # When enabled, workflow completion notifier creates a new comment instead of
     # editing the activation comment. Creates an append-only timeline of workflow
     # runs. Default: false
@@ -4179,9 +4426,16 @@ safe-outputs:
   # (optional)
   footer: true
 
-  # When true, creates a parent '[aw] Failed runs' issue that tracks all
-  # workflow failures as sub-issues. Helps organize failure tracking but may be
-  # unnecessary in smaller repositories. Defaults to false.
+  # When set to false or "false", disables all activation and fallback comments
+  # entirely (run-started, run-success, run-failure, PR/issue creation links).
+  # Supports templatable boolean values including GitHub Actions expressions (e.g.
+  # ${{ inputs.activation-comments }}). Default: true
+  # (optional)
+  activation-comments: null
+
+  # When true, creates a parent '[aw] Failed runs' issue that tracks all workflow
+  # failures as sub-issues. Helps organize failure tracking but may be unnecessary
+  # in smaller repositories. Defaults to false.
   # (optional)
   group-reports: true
 
@@ -4197,12 +4451,35 @@ safe-outputs:
   # Option 2: GitHub Actions expression that resolves to an integer at runtime
   max-bot-mentions: "example-value"
 
+  # Override the id-token permission for the safe-outputs job. Use 'write' to
+  # force-enable the id-token: write permission (required for OIDC authentication
+  # with cloud providers). Use 'none' to suppress automatic detection and prevent
+  # adding id-token: write even when vault/OIDC actions are detected in steps. By
+  # default, the compiler auto-detects known OIDC/vault actions
+  # (aws-actions/configure-aws-credentials, azure/login, google-github-actions/auth,
+  # hashicorp/vault-action, cyberark/conjur-action) and adds id-token: write
+  # automatically.
+  # (optional)
+  id-token: "write"
+
+  # Concurrency group for the safe-outputs job. When set, the safe-outputs job will
+  # use this concurrency group with cancel-in-progress: false. Supports GitHub
+  # Actions expressions.
+  # (optional)
+  concurrency-group: "example-value"
+
   # Runner specification for all safe-outputs jobs (activation, create-issue,
   # add-comment, etc.). Single runner label (e.g., 'ubuntu-slim', 'ubuntu-latest',
   # 'windows-latest', 'self-hosted'). Defaults to 'ubuntu-slim'. See
   # https://github.blog/changelog/2025-10-28-1-vcpu-linux-runner-now-available-in-github-actions-in-public-preview/
   # (optional)
   runs-on: "example-value"
+
+  # Custom steps to inject into all safe-output jobs. These steps run after checking
+  # out the repository and setting up the action, and before any safe-output code
+  # executes.
+  # (optional)
+  steps: []
 
 # Configuration for secret redaction behavior in workflow outputs and artifacts
 # (optional)
@@ -4291,6 +4568,18 @@ safe-inputs:
 # (optional)
 runtimes:
   {}
+
+# Checkout configuration for the agent job. Controls how actions/checkout is
+# invoked. Can be a single checkout configuration or an array for multiple
+# checkouts.
+# (optional)
+# This field supports multiple formats (oneOf):
+
+# Option 1: Single checkout configuration for the default workspace
+
+# Option 2: Multiple checkout configurations
+checkout: []
+  # Array items: undefined
 ---
 ```
 

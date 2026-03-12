@@ -52,11 +52,10 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 )
 
-var expressionValidationLog = logger.New("workflow:expression_validation")
+var expressionValidationLog = newValidationLogger("expression")
 
 // maxFuzzyMatchSuggestions is the maximum number of similar expressions to suggest
 // when an unauthorized expression is found
@@ -73,6 +72,11 @@ var (
 	// comparisonExtractionRegex extracts property accesses from comparison expressions
 	// Matches patterns like "github.workflow == 'value'" and extracts "github.workflow"
 	comparisonExtractionRegex = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:==|!=|<|>|<=|>=)\s*`)
+	// stringLiteralRegex matches single-quoted, double-quoted, or backtick-quoted string literals.
+	// Note: escape sequences inside strings are not handled; GitHub Actions uses '' for literal quotes.
+	stringLiteralRegex = regexp.MustCompile(`^'[^']*'$|^"[^"]*"$|^` + "`[^`]*`$")
+	// numberLiteralRegex matches integer and decimal number literals (with optional leading minus)
+	numberLiteralRegex = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 )
 
 // validateExpressionSafety checks that all GitHub Actions expressions in the markdown content
@@ -233,6 +237,15 @@ func validateExpressionForDangerousProps(expression string) error {
 func validateSingleExpression(expression string, opts ExpressionValidationOptions) error {
 	expression = strings.TrimSpace(expression)
 
+	// Allow literal values (string, number, boolean) without further checks.
+	// These appear as leaf nodes when the parser decomposes compound expressions
+	// such as "inputs.devices || 'mobile,tablet,desktop'" and are safe constants.
+	if stringLiteralRegex.MatchString(expression) ||
+		numberLiteralRegex.MatchString(expression) ||
+		expression == "true" || expression == "false" {
+		return nil
+	}
+
 	// First, check for dangerous JavaScript property names that could be used for
 	// prototype pollution or traversal attacks (PR #14826)
 	if err := validateExpressionForDangerousProps(expression); err != nil {
@@ -281,9 +294,9 @@ func validateSingleExpression(expression string, opts ExpressionValidationOption
 			if leftIsSafe {
 				// Check if right side is a literal string (single, double, or backtick quotes)
 				// Note: Using (?:) for non-capturing group and checking each quote type separately
-				isStringLiteral := regexp.MustCompile(`^'[^']*'$|^"[^"]*"$|^` + "`[^`]*`$").MatchString(rightExpr)
+				isStringLiteral := stringLiteralRegex.MatchString(rightExpr)
 				// Check if right side is a number literal
-				isNumberLiteral := regexp.MustCompile(`^-?\d+(\.\d+)?$`).MatchString(rightExpr)
+				isNumberLiteral := numberLiteralRegex.MatchString(rightExpr)
 				// Check if right side is a boolean literal
 				isBooleanLiteral := rightExpr == "true" || rightExpr == "false"
 
@@ -352,12 +365,6 @@ func validateSingleExpression(expression string, opts ExpressionValidationOption
 // containsExpression checks if an expression is in the list
 func containsExpression(list *[]string, expr string) bool {
 	return slices.Contains(*list, expr)
-}
-
-// ValidateExpressionSafetyPublic is a public wrapper for validateExpressionSafety
-// that allows testing expression validation from external packages
-func ValidateExpressionSafetyPublic(markdownContent string) error {
-	return validateExpressionSafety(markdownContent)
 }
 
 // extractRuntimeImportPaths extracts all runtime-import file paths from markdown content.

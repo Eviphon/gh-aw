@@ -147,12 +147,8 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 	// Build the copilot command
 	var copilotCommand string
 
-	// When model is not configured, use the GH_AW_MODEL_AGENT_COPILOT fallback env var
-	// via shell expansion (${VAR:+ --model "$VAR"}) so users can set it as a GitHub variable.
-	// When model IS configured, COPILOT_MODEL is set in the env block (see below) and the
-	// Copilot CLI reads it natively - no --model flag in the shell command needed.
-	needsModelFlag := !modelConfigured
-	// Check if this is a detection job (has no SafeOutputs config)
+	// Determine model org variable name based on job type (used in env block below).
+	// The model is always passed via the native COPILOT_MODEL env var - no --model flag needed.
 	var modelEnvVar string
 	if isDetectionJob {
 		modelEnvVar = constants.EnvVarModelDetectionCopilot
@@ -174,26 +170,8 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 		commandName = "copilot"
 	}
 
-	if sandboxEnabled {
-		// Build base command
-		baseCommand := fmt.Sprintf("%s %s", commandName, shellJoinArgs(copilotArgs))
-
-		// Add conditional model flag if needed
-		if needsModelFlag {
-			copilotCommand = fmt.Sprintf(`%s${%s:+ --model "$%s"}`, baseCommand, modelEnvVar, modelEnvVar)
-		} else {
-			copilotCommand = baseCommand
-		}
-	} else {
-		baseCommand := fmt.Sprintf("%s %s", commandName, shellJoinArgs(copilotArgs))
-
-		// Add conditional model flag if needed
-		if needsModelFlag {
-			copilotCommand = fmt.Sprintf(`%s${%s:+ --model "$%s"}`, baseCommand, modelEnvVar, modelEnvVar)
-		} else {
-			copilotCommand = baseCommand
-		}
-	}
+	// Build the command - model is always passed via COPILOT_MODEL env var (see env block below)
+	copilotCommand = fmt.Sprintf("%s %s", commandName, shellJoinArgs(copilotArgs))
 
 	// Conditionally wrap with sandbox (AWF only)
 	var command string
@@ -218,13 +196,18 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 			WorkflowData:   workflowData,
 			UsesTTY:        false, // Copilot doesn't require TTY
 			AllowedDomains: allowedDomains,
-			PathSetup:      "", // No path setup needed on host side
+			// Create the agent step summary file before AWF starts so it is accessible
+			// inside the sandbox. The agent writes its step summary content here, and the
+			// file is appended to $GITHUB_STEP_SUMMARY after secret redaction.
+			PathSetup: "touch " + AgentStepSummaryPath,
 		})
 	} else {
-		// Run copilot command without AWF wrapper
+		// Run copilot command without AWF wrapper.
+		// Prepend a touch command to create the agent step summary file before copilot runs.
 		command = fmt.Sprintf(`set -o pipefail
+touch %s
 COPILOT_CLI_INSTRUCTION="$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"
-%s%s 2>&1 | tee %s`, mkdirCommands.String(), copilotCommand, logFile)
+%s%s 2>&1 | tee %s`, AgentStepSummaryPath, mkdirCommands.String(), copilotCommand, logFile)
 	}
 
 	// Use COPILOT_GITHUB_TOKEN: when the copilot-requests feature is enabled, use the GitHub
@@ -245,10 +228,14 @@ COPILOT_CLI_INSTRUCTION="$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"
 		"XDG_CONFIG_HOME":           "/home/runner",
 		"COPILOT_AGENT_RUNNER_TYPE": "STANDALONE",
 		"COPILOT_GITHUB_TOKEN":      copilotGitHubToken,
-		"GITHUB_STEP_SUMMARY":       "${{ env.GITHUB_STEP_SUMMARY }}",
-		"GITHUB_HEAD_REF":           "${{ github.head_ref }}",
-		"GITHUB_REF_NAME":           "${{ github.ref_name }}",
-		"GITHUB_WORKSPACE":          "${{ github.workspace }}",
+		// Override GITHUB_STEP_SUMMARY with a path that exists inside the sandbox.
+		// The runner's original path is unreachable within the AWF isolated filesystem;
+		// we create this file before the agent starts and append it to the real
+		// $GITHUB_STEP_SUMMARY after secret redaction.
+		"GITHUB_STEP_SUMMARY": AgentStepSummaryPath,
+		"GITHUB_HEAD_REF":     "${{ github.head_ref }}",
+		"GITHUB_REF_NAME":     "${{ github.ref_name }}",
+		"GITHUB_WORKSPACE":    "${{ github.workspace }}",
 		// Pass GitHub server URL and API URL for GitHub Enterprise compatibility.
 		// In standard GitHub.com environments these resolve to https://github.com and
 		// https://api.github.com. In GitHub Enterprise they resolve to the enterprise
@@ -273,7 +260,7 @@ COPILOT_CLI_INSTRUCTION="$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"
 
 	if hasGitHubTool(workflowData.ParsedTools) {
 		// If GitHub App is configured, use the app token (overrides custom and default tokens)
-		if workflowData.ParsedTools != nil && workflowData.ParsedTools.GitHub != nil && workflowData.ParsedTools.GitHub.App != nil {
+		if workflowData.ParsedTools != nil && workflowData.ParsedTools.GitHub != nil && workflowData.ParsedTools.GitHub.GitHubApp != nil {
 			env["GITHUB_MCP_SERVER_TOKEN"] = "${{ steps.github-mcp-app-token.outputs.token }}"
 		} else {
 			customGitHubToken := getGitHubToken(workflowData.Tools["github"])
@@ -301,21 +288,18 @@ COPILOT_CLI_INSTRUCTION="$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"
 	}
 
 	// Set the model environment variable.
-	// When model is configured, use the native COPILOT_MODEL env var - the Copilot CLI reads it
-	// directly, avoiding the need to embed the value in the shell command (which would fail
-	// template injection validation for GitHub Actions expressions like ${{ inputs.model }}).
-	// When model is not configured, fall back to GH_AW_MODEL_AGENT/DETECTION_COPILOT so users
-	// can set a default via GitHub Actions variables.
+	// The model is always passed via the native COPILOT_MODEL env var, which the Copilot CLI reads
+	// directly. This avoids embedding the value in the shell command (which would fail template
+	// injection validation for GitHub Actions expressions like ${{ inputs.model }}).
+	// When model is explicitly configured, use its value directly.
+	// When model is not configured, map the GitHub org variable to COPILOT_MODEL so users can set
+	// a default via GitHub Actions variables without requiring per-workflow frontmatter changes.
 	if modelConfigured {
 		copilotExecLog.Printf("Setting %s env var for model: %s", constants.CopilotCLIModelEnvVar, workflowData.EngineConfig.Model)
 		env[constants.CopilotCLIModelEnvVar] = workflowData.EngineConfig.Model
 	} else {
-		// No model configured - use fallback GitHub variable with shell expansion
-		if isDetectionJob {
-			env[constants.EnvVarModelDetectionCopilot] = fmt.Sprintf("${{ vars.%s || '' }}", constants.EnvVarModelDetectionCopilot)
-		} else {
-			env[constants.EnvVarModelAgentCopilot] = fmt.Sprintf("${{ vars.%s || '' }}", constants.EnvVarModelAgentCopilot)
-		}
+		// No model configured - map org variable to native COPILOT_MODEL env var
+		env[constants.CopilotCLIModelEnvVar] = fmt.Sprintf("${{ vars.%s || '' }}", modelEnvVar)
 	}
 
 	// Add custom environment variables from engine config
@@ -385,6 +369,21 @@ COPILOT_CLI_INSTRUCTION="$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"
 	steps = append(steps, GitHubActionStep(stepLines))
 
 	return steps
+}
+
+// generateInferenceAccessErrorDetectionStep generates a step that detects if the Copilot CLI
+// failed due to a token with invalid access to inference (policy access denied error).
+// The step always runs and checks the agent stdio log for known error patterns.
+func generateInferenceAccessErrorDetectionStep() GitHubActionStep {
+	var step []string
+
+	step = append(step, "      - name: Detect inference access error")
+	step = append(step, "        id: detect-inference-error")
+	step = append(step, "        if: always()")
+	step = append(step, "        continue-on-error: true")
+	step = append(step, "        run: bash /opt/gh-aw/actions/detect_inference_access_error.sh")
+
+	return GitHubActionStep(step)
 }
 
 // extractAddDirPaths extracts all directory paths from copilot args that follow --add-dir flags

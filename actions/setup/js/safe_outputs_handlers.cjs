@@ -1,4 +1,5 @@
 // @ts-check
+/// <reference types="@actions/github-script" />
 
 const fs = require("fs");
 const path = require("path");
@@ -15,6 +16,7 @@ const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_CONFIG, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
 const { findRepoCheckout } = require("./find_repo_checkout.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo } = require("./repo_helpers.cjs");
+const { getOrGenerateTemporaryId } = require("./temporary_id.cjs");
 
 /**
  * Create handlers for safe output tools
@@ -160,7 +162,18 @@ function createHandlers(server, appendSafeOutput, config = {}) {
 
     const githubServer = process.env.GITHUB_SERVER_URL || "https://github.com";
     const repo = process.env.GITHUB_REPOSITORY || "owner/repo";
-    const url = `${githubServer.replace("github.com", "raw.githubusercontent.com")}/${repo}/${normalizedBranchName}/${targetFileName}`;
+    let url;
+    try {
+      const serverHostname = new URL(githubServer).hostname;
+      if (serverHostname === "github.com") {
+        url = `https://raw.githubusercontent.com/${repo}/${normalizedBranchName}/${targetFileName}`;
+      } else {
+        // GitHub Enterprise Server - raw content is served from the same host with /raw/ path
+        url = `${githubServer}/${repo}/raw/${normalizedBranchName}/${targetFileName}`;
+      }
+    } catch {
+      url = `${githubServer}/${repo}/raw/${normalizedBranchName}/${targetFileName}`;
+    }
 
     // Create entry for safe outputs
     const entry = {
@@ -459,17 +472,197 @@ function createHandlers(server, appendSafeOutput, config = {}) {
   };
 
   /**
+   * Handler for push_repo_memory tool
+   * Validates that memory files in the configured memory directory are within size limits.
+   * Returns an error if any file or the total size exceeds the configured limits,
+   * with guidance to reduce memory size before the workflow completes.
+   */
+  const pushRepoMemoryHandler = args => {
+    const memoryId = (args && args.memory_id) || "default";
+    const repoMemoryConfig = config.push_repo_memory;
+
+    if (!repoMemoryConfig || !repoMemoryConfig.memories || repoMemoryConfig.memories.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ result: "success", message: "No repo-memory configured." }),
+          },
+        ],
+      };
+    }
+
+    // Find the memory config for the requested memory_id
+    const memoryConf = repoMemoryConfig.memories.find(m => m.id === memoryId);
+    if (!memoryConf) {
+      const availableIds = repoMemoryConfig.memories.map(m => m.id).join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: `Memory ID '${memoryId}' not found. Available memory IDs: ${availableIds}`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const memoryDir = memoryConf.dir;
+    const maxFileSize = memoryConf.max_file_size || 10240;
+    const maxPatchSize = memoryConf.max_patch_size || 10240;
+    const maxFileCount = memoryConf.max_file_count || 100;
+    // Allow 20% overhead for git diff format (headers, context lines, etc.)
+    const effectiveMaxPatchSize = Math.floor(maxPatchSize * 1.2);
+
+    if (!fs.existsSync(memoryDir)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ result: "success", message: `Memory directory '${memoryDir}' does not exist yet. No files to validate.` }),
+          },
+        ],
+      };
+    }
+
+    // Recursively scan all files in the memory directory
+    /** @type {Array<{relativePath: string, size: number}>} */
+    const files = [];
+
+    /**
+     * @param {string} dirPath
+     * @param {string} relativePath
+     */
+    function scanDir(dirPath, relativePath) {
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+        const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+        if (entry.isDirectory()) {
+          scanDir(fullPath, relPath);
+        } else if (entry.isFile()) {
+          const stats = fs.statSync(fullPath);
+          files.push({ relativePath: relPath.replace(/\\/g, "/"), size: stats.size });
+        }
+      }
+    }
+
+    try {
+      scanDir(memoryDir, "");
+    } catch (/** @type {any} */ error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: `Failed to scan memory directory: ${getErrorMessage(error)}`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Check individual file sizes
+    const oversizedFiles = files.filter(f => f.size > maxFileSize);
+    if (oversizedFiles.length > 0) {
+      const details = oversizedFiles.map(f => `  - ${f.relativePath} (${f.size} bytes > ${maxFileSize} bytes limit)`).join("\n");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error:
+                `${oversizedFiles.length} file(s) exceed the maximum file size of ${maxFileSize} bytes (${Math.ceil(maxFileSize / 1024)} KB):\n${details}\n\n` +
+                `Please reduce the size of these files before the workflow completes. Consider summarizing or truncating the content.`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Check file count
+    if (files.length > maxFileCount) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: `Too many files in memory: ${files.length} files exceeds the limit of ${maxFileCount} files.\n\n` + `Please reduce the number of files in '${memoryDir}' before the workflow completes.`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Check total size. The effective limit allows 20% overhead to account for
+    // git diff format overhead (headers, context lines, metadata). This mirrors
+    // the same calculation in push_repo_memory.cjs. The totalSize is the raw
+    // sum of file sizes; it is compared against the overhead-adjusted limit.
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const totalSizeKb = Math.ceil(totalSize / 1024);
+    const effectiveMaxKb = Math.floor(effectiveMaxPatchSize / 1024);
+
+    core.debug(`push_repo_memory validation: ${files.length} files, total ${totalSize} bytes, effective limit ${effectiveMaxPatchSize} bytes`);
+
+    if (totalSize > effectiveMaxPatchSize) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error:
+                `Total memory size (${totalSizeKb} KB) exceeds the allowed limit of ${effectiveMaxKb} KB ` +
+                `(configured limit: ${Math.floor(maxPatchSize / 1024)} KB with 20% overhead for git diff format).\n\n` +
+                `Please reduce the total size of files in '${memoryDir}' before the workflow completes. ` +
+                `Consider: summarizing notes instead of keeping full history, removing outdated entries, or compressing data. ` +
+                `Then call push_repo_memory again to verify the size is within limits.`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            result: "success",
+            message: `Memory validation passed: ${files.length} file(s), ${totalSizeKb} KB total (limit: ${effectiveMaxKb} KB with 20% overhead).`,
+          }),
+        },
+      ],
+    };
+  };
+
+  /**
    * Handler for create_project tool
    * Auto-generates a temporary ID if not provided and returns it to the agent
    */
   const createProjectHandler = args => {
     const entry = { ...(args || {}), type: "create_project" };
 
-    // Generate temporary_id if not provided
-    if (!entry.temporary_id) {
-      entry.temporary_id = "aw_" + crypto.randomBytes(6).toString("hex");
-      server.debug(`Auto-generated temporary_id for create_project: ${entry.temporary_id}`);
+    // Use helper to validate or generate temporary_id
+    const tempIdResult = getOrGenerateTemporaryId(entry, "create_project");
+    if (tempIdResult.error) {
+      throw {
+        code: -32602,
+        message: tempIdResult.error,
+      };
     }
+    entry.temporary_id = tempIdResult.temporaryId;
+    server.debug(`temporary_id for create_project: ${entry.temporary_id}`);
 
     // Append to safe outputs
     appendSafeOutput(entry);
@@ -493,12 +686,13 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    * Handler for add_comment tool
    * Per Safe Outputs Specification MCE1: Enforces constraints during tool invocation
    * to provide immediate feedback to the LLM before recording to NDJSON
+   * Also auto-generates a temporary_id if not provided and returns it to the agent
    */
   const addCommentHandler = args => {
     // Validate comment constraints before appending to safe outputs
     // This provides early feedback per Requirement MCE1 (Early Validation)
     try {
-      const body = args.body || "";
+      const body = (args && args.body) || "";
       enforceCommentLimits(body);
     } catch (error) {
       // Return validation error with specific constraint violation details
@@ -510,8 +704,36 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
-    // If validation passes, record the operation using default handler
-    return defaultHandler("add_comment")(args);
+    // Build the entry with a temporary_id
+    const entry = { ...(args || {}), type: "add_comment" };
+
+    // Use helper to validate or generate temporary_id
+    const tempIdResult = getOrGenerateTemporaryId(entry, "add_comment");
+    if (tempIdResult.error) {
+      throw {
+        code: -32602,
+        message: tempIdResult.error,
+      };
+    }
+    entry.temporary_id = tempIdResult.temporaryId;
+    server.debug(`temporary_id for add_comment: ${entry.temporary_id}`);
+
+    // Append to safe outputs
+    appendSafeOutput(entry);
+
+    // Return the temporary_id to the agent so it can reference this comment
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            result: "success",
+            temporary_id: entry.temporary_id,
+            comment: `#${entry.temporary_id}`,
+          }),
+        },
+      ],
+    };
   };
 
   return {
@@ -519,6 +741,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     uploadAssetHandler,
     createPullRequestHandler,
     pushToPullRequestBranchHandler,
+    pushRepoMemoryHandler,
     createProjectHandler,
     addCommentHandler,
   };

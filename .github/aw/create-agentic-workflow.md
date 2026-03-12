@@ -93,6 +93,37 @@ You love to use emojis to make the conversation more engaging.
   - `gh aw compile --strict` → compile with strict mode validation (recommended for production)
   - `gh aw compile --purge` → remove stale lock files
 
+## 🔐 Security Posture: Agent Job Must Stay Read-Only
+
+**CRITICAL**: The agent job permissions must be **read-only** for all scopes. All GitHub write operations (creating issues, adding comments, creating PRs, updating discussions) must go through the **`safe-outputs`** system — never by granting write permissions directly on the agent job.
+
+### ✅ Correct: Agent job read-only, writes via safe-outputs
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+safe-outputs:
+  create-issue:
+    max: 3
+  add-comment:
+    max: 5
+```
+
+### ❌ Incorrect: Write permissions on agent job
+
+```yaml
+permissions:
+  contents: read
+  issues: write   # WRONG: agent job must stay read-only
+```
+
+**Why this matters**: Granting write permissions directly on the agent job bypasses the safety controls that `safe-outputs` provide. Safe-outputs enforce output validation, rate limiting, and audit trails that protect against runaway or compromised AI behaviour.
+
+**Rule**: If a workflow needs to create issues, add comments, or perform any GitHub write operation, always use `safe-outputs:` in the frontmatter — never add `write` permissions to the agent job.
+
 ## ⚠️ Architectural Constraints: Know What's Possible
 
 **CRITICAL**: Before designing workflows, understand the architectural limitations of agentic workflows. Being clear about what agentic workflows CAN'T do prevents creating non-functional solutions.
@@ -230,6 +261,21 @@ These resources contain workflow patterns, best practices, safe outputs, and per
    Choosing tools and MCPs:
 
    - You do not have to use any MCPs. You should only configure MCP servers when the user requests integration with an external service or API and there is no built-in GitHub tool available. Be cautious about adding complexity with MCP servers unless necessary.
+
+   - ⚠️ **GitHub API Access — All Engines**: Agentic workflow engines (including `copilot`, `claude`, `codex`, and custom engines) **cannot access `api.github.com` directly**. For any GitHub API operations (reading issues, searching PRs, listing commits, checking runs, etc.), you **must** configure the GitHub MCP server via `tools: github:`. Adding `api.github.com` to `network: allowed:` will **NOT** work and will cause silent failures.
+     - ✅ **CORRECT** — GitHub MCP server:
+       ```yaml
+       tools:
+         github:
+           mode: remote
+           toolsets: [default]
+       ```
+     - ❌ **WRONG** — Direct API access (will silently fail):
+       ```yaml
+       network:
+         allowed:
+           - api.github.com   # Does not grant API access to the engine
+       ```
 
    - The Serena MCP server should only be used when the user specifically requests semantic code parsing and analysis or repository introspection beyond what built-in GitHub tools provide or a regular coding agent will perform. Most routine code analysis tasks can be handled by the coding agent itself without Serena.
 
@@ -483,7 +529,7 @@ These resources contain workflow patterns, best practices, safe outputs, and per
 4. **Generate Workflows**
    - Author workflows in the **agentic markdown format** (frontmatter: `on:`, `permissions:`, `tools:`, `mcp-servers:`, `safe-outputs:`, `network:`, etc.).
    - Compile with `gh aw compile` to produce `.github/workflows/<name>.lock.yml`.
-   - 💡 If the task benefits from **caching** (repeated model calls, large context reuse), suggest top-level **`cache-memory:`**.
+   - 💡 If the task benefits from **caching** (repeated model calls, large context reuse), suggest top-level **`cache-memory:`** (see [filename safety note](#cache-memory-filename-safety) below).
    - ✨ **Keep frontmatter minimal** - Only include fields that differ from sensible defaults:
      - ⚙️ **DO NOT include `engine: copilot`** - Copilot is the default engine. Only specify engine if user explicitly requests Claude, Codex, or custom.
      - ⏱️ **DO NOT include `timeout-minutes:`** unless user needs a specific timeout - the default is sensible.
@@ -521,6 +567,13 @@ When creating workflows that involve coding agents operating in large repositori
   tools:
     cache-memory: true
   ```
+
+  > ⚠️ **Filename safety**: Cache-memory files are uploaded as GitHub Actions artifacts.
+  > Artifact filenames **must not contain colons** (NTFS limitation).
+  > ✅ Use: `investigation-2026-02-12-11-20-45.json`
+  > ❌ Avoid: `investigation-2026-02-12T11:20:45Z.json`
+  > When instructing the agent to write timestamped files, explicitly say:
+  > "Use filesystem-safe timestamp format `YYYY-MM-DD-HH-MM-SS[-sss]` (no colons, no `T`, no `Z`)."
 
   **In the workflow instructions**:
   1. **List all items** to process (e.g., find all packages/modules/directories)
@@ -583,7 +636,7 @@ Based on the parsed requirements, determine:
    - **Note**: `workflow_dispatch:` is automatically added ONLY for fuzzy schedules (`daily`, `weekly`, etc.). For other triggers, add it explicitly if manual execution is desired.
 3. **Tools**: Determine required tools:
    - **`bash` and `edit` are enabled by default** - No need to add (sandboxed by AWF)
-   - GitHub API reads → `tools: github: toolsets: [default]` (use toolsets, NOT allowed)
+   - GitHub API reads → `tools: github: toolsets: [default]` (use toolsets, NOT allowed); ⚠️ engines cannot access `api.github.com` directly — GitHub MCP is required for all GitHub API operations
    - Web access → `tools: web-fetch:` and `network: allowed: [<domains>]`
    - Browser automation → `tools: playwright:` and `network: allowed: [<domains>]`
    - **Network ecosystem inference**: For workflows that build/test/install packages, always include the language ecosystem in `network: allowed:`. Never use `network: defaults` alone — it only covers basic infrastructure, not package registries. Detect from repository files:

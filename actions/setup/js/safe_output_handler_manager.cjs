@@ -20,6 +20,8 @@ const { getIssuesToAssignCopilot } = require("./create_issue.cjs");
 const { createReviewBuffer } = require("./pr_review_buffer.cjs");
 const { sanitizeContent } = require("./sanitize_content.cjs");
 const { createManifestLogger, ensureManifestExists, extractCreatedItemFromResult } = require("./safe_output_manifest.cjs");
+const { loadCustomSafeOutputJobTypes } = require("./safe_output_helpers.cjs");
+const { emitSafeOutputActionOutputs } = require("./safe_outputs_action_outputs.cjs");
 
 /**
  * Handler map configuration
@@ -244,6 +246,19 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
   /** @type {Array<{type: string, error: string}>} */
   const codePushFailures = [];
 
+  // Track when a code-push operation falls back to creating a review issue instead.
+  // When set, subsequent add_comment messages will receive a correction note prepended
+  // to their body so the posted comment accurately reflects the actual outcome.
+  /** @type {{type: string, issueNumber: number, issueUrl: string}|null} */
+  let codePushFallbackInfo = null;
+
+  // Load custom safe output job types (from GH_AW_SAFE_OUTPUT_JOBS env var)
+  // These are processed by dedicated custom job steps, not by this handler manager
+  const customJobTypes = loadCustomSafeOutputJobTypes();
+  if (customJobTypes.size > 0) {
+    core.info(`Loaded ${customJobTypes.size} custom safe output job type(s): ${[...customJobTypes].join(", ")}`);
+  }
+
   core.info(`Processing ${messages.length} message(s) in order of appearance...`);
 
   // Process messages in order of appearance
@@ -287,6 +302,20 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
         continue;
       }
 
+      // Check if this message type is handled by a custom safe output job
+      if (customJobTypes.has(messageType)) {
+        // Silently skip - this is handled by a custom safe output job step
+        core.debug(`Message ${i + 1} (${messageType}) will be handled by custom safe output job`);
+        results.push({
+          type: messageType,
+          messageIndex: i,
+          success: false,
+          skipped: true,
+          reason: "Handled by custom safe output job",
+        });
+        continue;
+      }
+
       // Unknown message type - warn the user
       core.warning(
         `⚠️ No handler loaded for message type '${messageType}' (message ${i + 1}/${messages.length}). The message will be skipped. This may happen if the safe output type is not configured in the workflow's safe-outputs section.`
@@ -309,8 +338,18 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
       // Record the temp ID map size before processing to detect new IDs
       const tempIdMapSizeBefore = temporaryIdMap.size;
 
+      // If a previous code-push operation fell back to a review issue, prepend a correction
+      // note to add_comment bodies so the posted comment accurately reflects the outcome.
+      // The note is placed before the AI-generated body so users see the clarification immediately.
+      let effectiveMessage = message;
+      if (messageType === "add_comment" && codePushFallbackInfo) {
+        const fallbackNote = `\n\n---\n> [!NOTE]\n> The pull request was not created — a fallback review issue was created instead due to protected file changes: [#${codePushFallbackInfo.issueNumber}](${codePushFallbackInfo.issueUrl})\n\n`;
+        effectiveMessage = { ...message, body: fallbackNote + (message.body || "") };
+        core.info(`Prepending fallback correction note to add_comment body (fallback issue: #${codePushFallbackInfo.issueNumber})`);
+      }
+
       // Call the message handler with the individual message and resolved temp IDs
-      const result = await messageHandler(message, resolvedTemporaryIds, temporaryIdMap);
+      const result = await messageHandler(effectiveMessage, resolvedTemporaryIds, temporaryIdMap);
 
       // Check if the handler explicitly returned a failure
       if (result && result.success === false && !result.deferred) {
@@ -335,7 +374,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
         core.info(`⏸ Message ${i + 1} (${messageType}) deferred - will retry after first pass`);
         deferredMessages.push({
           type: messageType,
-          message: message,
+          message: effectiveMessage,
           messageIndex: i,
           handler: messageHandler,
         });
@@ -357,6 +396,13 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
           number: result.number,
         });
         core.info(`Registered temporary ID: ${result.temporaryId} -> ${result.repo}#${result.number}`);
+      }
+
+      // Track when a code-push operation falls back to a review issue so subsequent
+      // add_comment messages can include a correction note.
+      if (CODE_PUSH_TYPES.has(messageType) && result && result.fallback_used === true && result.issue_number != null && result.issue_url) {
+        codePushFallbackInfo = { type: messageType, issueNumber: result.issue_number, issueUrl: result.issue_url };
+        core.info(`Code push '${messageType}' fell back to review issue #${result.issue_number} — add_comment messages will be annotated`);
       }
 
       // Check if this output was created with unresolved temporary IDs
@@ -899,6 +945,7 @@ async function main() {
     const cancelledCount = processingResult.results.filter(r => r.cancelled).length;
     const deferredCount = processingResult.results.filter(r => r.deferred).length;
     const skippedStandaloneResults = processingResult.results.filter(r => r.skipped && r.reason === "Handled by standalone step");
+    const skippedCustomJobResults = processingResult.results.filter(r => r.skipped && r.reason === "Handled by custom safe output job");
     const skippedNoHandlerResults = processingResult.results.filter(r => !r.success && !r.skipped && r.error?.includes("No handler loaded"));
 
     core.info(`\n=== Processing Summary ===`);
@@ -916,6 +963,11 @@ async function main() {
       const standaloneTypes = [...new Set(skippedStandaloneResults.map(r => r.type))];
       core.info(`  Types: ${standaloneTypes.join(", ")}`);
     }
+    if (skippedCustomJobResults.length > 0) {
+      core.info(`Skipped (custom safe output job): ${skippedCustomJobResults.length}`);
+      const customJobTypesList = [...new Set(skippedCustomJobResults.map(r => r.type))];
+      core.info(`  Types: ${customJobTypesList.join(", ")}`);
+    }
     if (skippedNoHandlerResults.length > 0) {
       core.warning(`Skipped (no handler): ${skippedNoHandlerResults.length}`);
       const noHandlerTypes = [...new Set(skippedNoHandlerResults.map(r => r.type))];
@@ -926,6 +978,11 @@ async function main() {
 
     if (failureCount > 0) {
       core.warning(`${failureCount} message(s) failed to process`);
+      const failedItems = processingResult.results
+        .filter(r => !r.success && !r.deferred && !r.skipped && !r.cancelled)
+        .map(r => `  - ${r.type}: ${r.error || "Unknown error"}`)
+        .join("\n");
+      core.setFailed(`${failureCount} safe output(s) failed:\n${failedItems}`);
     }
     if (cancelledCount > 0) {
       core.warning(`${cancelledCount} message(s) were cancelled because a code push operation failed`);
@@ -983,6 +1040,10 @@ async function main() {
     if (codePushFailureCount > 0) {
       core.info(`Exported ${codePushFailureCount} code push failure(s)`);
     }
+
+    // Emit named action outputs (e.g. created_issue_number, created_issue_url)
+    // for the first successful result of each safe output type.
+    emitSafeOutputActionOutputs(processingResult);
 
     // Ensure the manifest file always exists for artifact upload (even if no items were created).
     // Skip in staged mode — no real items were created so no manifest should be emitted.

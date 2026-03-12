@@ -448,13 +448,17 @@ Agent output includes `parent_issue_number` and `sub_issue_number`. Validation e
 
 ### Project Creation (`create-project:`)
 
-Creates new GitHub Projects V2 boards. Requires PAT or GitHub App token ([`GH_AW_PROJECT_GITHUB_TOKEN`](/gh-aw/reference/auth-projects/))-default `GITHUB_TOKEN` lacks Projects v2 access. Supports optional view configuration to create custom project views at creation time.
+Creates new GitHub Projects V2 boards. Requires a write-capable PAT or GitHub App token ([project token authentication](/gh-aw/patterns/project-ops/#project-token-authentication)); default `GITHUB_TOKEN` lacks Projects v2 access. Supports optional view configuration to create custom project views at creation time.
+
+Use separate tokens as shown in ProjectOps examples:
+- `GH_AW_READ_PROJECT_TOKEN` for `tools.github` reads
+- `GH_AW_WRITE_PROJECT_TOKEN` for `safe-outputs` project writes
 
 ```yaml wrap
 safe-outputs:
   create-project:
     max: 1                              # max operations (default: 1)
-    github-token: ${{ secrets.GH_AW_PROJECT_GITHUB_TOKEN }}
+    github-token: ${{ secrets.GH_AW_WRITE_PROJECT_TOKEN }}
     target-owner: "myorg"               # default target owner (optional)
     title-prefix: "Project"             # default title prefix (optional)
     views:                              # optional: auto-create views
@@ -504,14 +508,14 @@ Optionally include `item_url` (GitHub issue URL) to add the issue as the first p
 
 ### Project Board Updates (`update-project:`)
 
-Manages GitHub Projects boards. Requires PAT or GitHub App token ([`GH_AW_PROJECT_GITHUB_TOKEN`](/gh-aw/reference/auth-projects/))-default `GITHUB_TOKEN` lacks Projects v2 access. Update-only by default; set `create_if_missing: true` to create boards (requires appropriate token permissions).
+Manages GitHub Projects boards. Requires a write-capable PAT or GitHub App token ([project token authentication](/gh-aw/patterns/project-ops/#project-token-authentication)); default `GITHUB_TOKEN` lacks Projects v2 access. Update-only by default; set `create_if_missing: true` to create boards (requires appropriate token permissions).
 
 ```yaml wrap
 safe-outputs:
   update-project:
     project: "https://github.com/orgs/myorg/projects/42"  # required: target project URL
     max: 20                         # max operations (default: 10)
-    github-token: ${{ secrets.GH_AW_PROJECT_GITHUB_TOKEN }}
+    github-token: ${{ secrets.GH_AW_WRITE_PROJECT_TOKEN }}
     views:                          # optional: auto-create views
       - name: "Sprint Board"
         layout: board
@@ -563,7 +567,7 @@ Project views can be created automatically by declaring them in the `views` arra
 ```yaml
 safe-outputs:
   update-project:
-    github-token: ${{ secrets.GH_AW_PROJECT_GITHUB_TOKEN }}
+    github-token: ${{ secrets.GH_AW_WRITE_PROJECT_TOKEN }}
     views:
       - name: "Sprint Board"        # required: view name
         layout: board               # required: table, board, or roadmap
@@ -602,14 +606,14 @@ Views are created automatically during workflow execution. The workflow must inc
 
 ### Project Status Updates (`create-project-status-update:`)
 
-Creates status updates on GitHub Projects boards to communicate progress, findings, and trends. Status updates appear in the project's Updates tab and provide a historical record of execution. Requires PAT or GitHub App token ([`GH_AW_PROJECT_GITHUB_TOKEN`](/gh-aw/reference/auth-projects/))-default `GITHUB_TOKEN` lacks Projects v2 access.
+Creates status updates on GitHub Projects boards to communicate progress, findings, and trends. Status updates appear in the project's Updates tab and provide a historical record of execution. Requires a write-capable PAT or GitHub App token ([project token authentication](/gh-aw/patterns/project-ops/#project-token-authentication)); default `GITHUB_TOKEN` lacks Projects v2 access.
 
 ```yaml wrap
 safe-outputs:
   create-project-status-update:
     project: "https://github.com/orgs/myorg/projects/73"  # required: target project URL
     max: 1                          # max updates per run (default: 1)
-    github-token: ${{ secrets.GH_AW_PROJECT_GITHUB_TOKEN }}
+    github-token: ${{ secrets.GH_AW_WRITE_PROJECT_TOKEN }}
 ```
 
 **Configuration options:**
@@ -1216,6 +1220,30 @@ jobs:
       - run: echo "Created issue ${{ needs.run-agent.outputs.created_issue_number }}"
 ```
 
+### Failure Issue Reporting (`report-failure-as-issue:`)
+
+Controls whether workflow failures are reported as GitHub issues (default: `true`). Set to `false` to suppress automatic failure issue creation for a specific workflow.
+
+```yaml wrap
+safe-outputs:
+  report-failure-as-issue: false
+  create-issue:
+```
+
+This mirrors the `noop.report-as-issue` pattern. Use this to silence noisy failure reports for workflows where failures are expected or handled externally.
+
+### Failure Issue Repository (`failure-issue-repo:`)
+
+Redirects failure tracking issues to a different repository. Useful when the current repository has issues disabled (e.g. `github/docs-internal`).
+
+```yaml wrap
+safe-outputs:
+  failure-issue-repo: github/docs-engineering
+  create-issue:
+```
+
+The value must be in `owner/repo` format. The `GITHUB_TOKEN` used must have permission to create issues in the target repository. When not set, failure issues are created in the current repository.
+
 ### Group Reports (`group-reports:`)
 
 Controls whether failed workflow runs are grouped under a parent "[aw] Failed runs" issue. This is opt-in and defaults to `false`.
@@ -1245,6 +1273,22 @@ safe-outputs:
 Use GitHub App tokens for enhanced security: on-demand token minting, automatic revocation, fine-grained permissions, and better attribution.
 
 See [Using a GitHub App for Authentication](/gh-aw/reference/auth/#using-a-github-app-for-authentication).
+
+### Environment Protection (`environment:`)
+
+Specifies the deployment environment for all compiler-generated safe-output jobs (`safe_outputs`, `conclusion`, `pre_activation`, custom safe-jobs). This makes environment-scoped secrets accessible in those jobs — for example, GitHub App credentials stored as environment secrets.
+
+The top-level `environment:` field is automatically propagated to all safe-output jobs. Use `safe-outputs.environment:` to override this independently:
+
+```yaml wrap
+safe-outputs:
+  environment: dev   # overrides top-level environment for safe-output jobs only
+  github-app:
+    app-id: ${{ secrets.WORKFLOW_APP_ID }}
+    private-key: ${{ secrets.WORKFLOW_APP_PRIVATE_KEY }}
+```
+
+Accepts a plain string or an object with `name` and optional `url`, consistent with the top-level `environment:` syntax.
 
 ### Text Sanitization (`allowed-domains:`, `allowed-github-references:`)
 
@@ -1345,8 +1389,36 @@ safe-outputs:
 
 **Variables**: `{workflow_name}`, `{run_url}`, `{triggering_number}`, `{workflow_source}`, `{workflow_source_url}`, `{event_type}`, `{status}`, `{operation}`
 
+## Staged Mode
+
+Staged mode lets you preview what safe outputs a workflow would create without actually creating anything. Every write operation is skipped; instead, a 🎭-labelled preview appears in the GitHub Actions step summary.
+
+Enable it globally by adding `staged: true` to the `safe-outputs:` block:
+
+```yaml wrap
+safe-outputs:
+  staged: true
+  create-issue:
+    title-prefix: "[ai] "
+    labels: [automation]
+```
+
+You can also scope staged mode to a specific output type by adding `staged: true` directly to that type while leaving the global setting at `false`:
+
+```yaml wrap
+safe-outputs:
+  create-pull-request:
+    staged: true   # preview only
+  add-comment:     # executes normally
+```
+
+To disable staged mode and start creating real resources, remove the `staged: true` setting or set it to `false`.
+
+See [Staged Mode](/gh-aw/reference/staged-mode/) for the full guide, including the preview message format, per-type support table, custom message templates, and how to implement staged mode in [custom safe output jobs](/gh-aw/reference/custom-safe-outputs/#staged-mode-support).
+
 ## Related Documentation
 
+- [Staged Mode](/gh-aw/reference/staged-mode/) - Preview safe output operations without making changes
 - [Threat Detection Guide](/gh-aw/reference/threat-detection/) - Complete threat detection documentation and examples
 - [Frontmatter](/gh-aw/reference/frontmatter/) - All configuration options for workflows
 - [Workflow Structure](/gh-aw/reference/workflow-structure/) - Directory layout and organization

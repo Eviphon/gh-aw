@@ -54,11 +54,11 @@ func (c *Compiler) buildConsolidatedSafeOutputsJob(data *WorkflowData, mainJobNa
 
 	// Add patch artifact download if create-pull-request or push-to-pull-request-branch is enabled
 	// Both of these safe outputs require the patch file to apply changes
-	// Download from unified agent-artifacts artifact
+	// Download from unified agent artifact
 	if usesPatchesAndCheckouts(data.SafeOutputs) {
 		consolidatedSafeOutputsJobLog.Print("Adding patch artifact download for create-pull-request or push-to-pull-request-branch")
 		patchDownloadSteps := buildArtifactDownloadSteps(ArtifactDownloadConfig{
-			ArtifactName: "agent-artifacts",
+			ArtifactName: constants.AgentArtifactName,
 			DownloadPath: "/tmp/gh-aw/",
 			SetupEnvStep: false, // No environment variable needed, the script checks the file directly
 			StepName:     "Download patch artifact",
@@ -244,7 +244,13 @@ func (c *Compiler) buildConsolidatedSafeOutputsJob(data *WorkflowData, mainJobNa
 
 	// Add GitHub App token minting step at the beginning if app is configured
 	if data.SafeOutputs.GitHubApp != nil {
-		appTokenSteps := c.buildGitHubAppTokenMintStep(data.SafeOutputs.GitHubApp, permissions)
+		// For workflow_call relay workflows, scope the token to the platform repo so that
+		// API calls targeting the host repo (e.g. dispatch_workflow) are authorized.
+		var appTokenFallbackRepo string
+		if hasWorkflowCallTrigger(data.On) {
+			appTokenFallbackRepo = "${{ needs.activation.outputs.target_repo }}"
+		}
+		appTokenSteps := c.buildGitHubAppTokenMintStep(data.SafeOutputs.GitHubApp, permissions, appTokenFallbackRepo)
 		// Calculate insertion index: after setup action (if present) and artifact downloads, but before checkout and safe output steps
 		insertIndex := 0
 
@@ -261,10 +267,10 @@ func (c *Compiler) buildConsolidatedSafeOutputsJob(data *WorkflowData, mainJobNa
 		insertIndex += len(buildAgentOutputDownloadSteps())
 
 		// Add patch download steps if present
-		// Download from unified agent-artifacts artifact
+		// Download from unified agent artifact
 		if usesPatchesAndCheckouts(data.SafeOutputs) {
 			patchDownloadSteps := buildArtifactDownloadSteps(ArtifactDownloadConfig{
-				ArtifactName: "agent-artifacts",
+				ArtifactName: constants.AgentArtifactName,
 				DownloadPath: "/tmp/gh-aw/",
 				SetupEnvStep: false,
 				StepName:     "Download patch artifact",
@@ -314,8 +320,11 @@ func (c *Compiler) buildConsolidatedSafeOutputsJob(data *WorkflowData, mainJobNa
 
 	// Build dependencies — detection is now inline in the agent job, no separate dependency needed
 	needs := []string{mainJobName}
-	// Add activation job dependency for jobs that need it (create_pull_request, push_to_pull_request_branch, lock-for-agent)
-	if usesPatchesAndCheckouts(data.SafeOutputs) || data.LockForAgent {
+	// Add activation job dependency when:
+	// - create_pull_request or push_to_pull_request_branch (need the activation artifact)
+	// - lock-for-agent (need the activation lock)
+	// - workflow_call trigger (need needs.activation.outputs.target_repo for cross-repo token/dispatch)
+	if usesPatchesAndCheckouts(data.SafeOutputs) || data.LockForAgent || hasWorkflowCallTrigger(data.On) {
 		needs = append(needs, string(constants.ActivationJobName))
 	}
 	// Add unlock job dependency if lock-for-agent is enabled
@@ -338,10 +347,17 @@ func (c *Compiler) buildConsolidatedSafeOutputsJob(data *WorkflowData, mainJobNa
 		consolidatedSafeOutputsJobLog.Printf("Configuring safe_outputs job concurrency group: %s", data.SafeOutputs.ConcurrencyGroup)
 	}
 
+	// Determine the environment for the safe-outputs job.
+	// If safe-outputs.environment is explicitly set, use that override.
+	// Otherwise, propagate the top-level environment: field so that environment-scoped
+	// secrets (e.g. for GitHub App token minting) are accessible in this job.
+	safeOutputsEnvironment := resolveSafeOutputsEnvironment(data)
+
 	job := &Job{
 		Name:           "safe_outputs",
 		If:             jobCondition.Render(),
 		RunsOn:         c.formatSafeOutputsRunsOn(data.SafeOutputs),
+		Environment:    c.indentYAMLLines(safeOutputsEnvironment, "    "),
 		Permissions:    permissions.RenderToYAML(),
 		TimeoutMinutes: 15, // Slightly longer timeout for consolidated job with multiple steps
 		Concurrency:    concurrency,
@@ -432,6 +448,17 @@ func (c *Compiler) buildJobLevelSafeOutputEnvVars(data *WorkflowData, workflowID
 	return envVars
 }
 
+// resolveSafeOutputsEnvironment resolves the effective GitHub deployment environment for
+// safe-output jobs. If safe-outputs.environment is explicitly set, it takes precedence.
+// Otherwise the top-level environment: field is propagated so that environment-scoped
+// secrets are accessible in all safe-output jobs.
+func resolveSafeOutputsEnvironment(data *WorkflowData) string {
+	if data.SafeOutputs != nil && data.SafeOutputs.Environment != "" {
+		return data.SafeOutputs.Environment
+	}
+	return data.Environment
+}
+
 // buildDetectionSuccessCondition builds the condition to check if detection passed.
 // Detection runs inline in the agent job and outputs detection_success.
 func buildDetectionSuccessCondition() ConditionNode {
@@ -446,7 +473,7 @@ func buildDetectionSuccessCondition() ConditionNode {
 // the manifest is available to the audit command even if some safe output steps fail.
 func buildSafeOutputItemsManifestUploadStep() []string {
 	return []string{
-		"      - name: Upload safe output items manifest\n",
+		"      - name: Upload Safe Output Items Manifest\n",
 		"        if: always()\n",
 		fmt.Sprintf("        uses: %s\n", GetActionPin("actions/upload-artifact")),
 		"        with:\n",

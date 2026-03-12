@@ -65,14 +65,14 @@ func (e *GeminiEngine) GetRequiredSecretNames(workflowData *WorkflowData) []stri
 		geminiLog.Printf("Added %d HTTP MCP header secrets", len(headerSecrets))
 	}
 
-	// Add safe-inputs secret names
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName := range safeInputsSecrets {
+	// Add mcp-scripts secret names
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName := range mcpScriptsSecrets {
 			secrets = append(secrets, varName)
 		}
-		if len(safeInputsSecrets) > 0 {
-			geminiLog.Printf("Added %d safe-inputs secrets", len(safeInputsSecrets))
+		if len(mcpScriptsSecrets) > 0 {
+			geminiLog.Printf("Added %d mcp-scripts secrets", len(mcpScriptsSecrets))
 		}
 	}
 
@@ -248,8 +248,10 @@ touch %s
 
 	// Build environment variables
 	env := map[string]string{
-		"GEMINI_API_KEY":   "${{ secrets.GEMINI_API_KEY }}",
-		"GH_AW_PROMPT":     "/tmp/gh-aw/aw-prompts/prompt.txt",
+		"GEMINI_API_KEY": "${{ secrets.GEMINI_API_KEY }}",
+		"GH_AW_PROMPT":   "/tmp/gh-aw/aw-prompts/prompt.txt",
+		// Tag the step as a GitHub AW agentic execution for discoverability by agents
+		"GITHUB_AW":        "true",
 		"GITHUB_WORKSPACE": "${{ github.workspace }}",
 		// Override GITHUB_STEP_SUMMARY with a path that exists inside the sandbox.
 		// The runner's original path is unreachable within the AWF isolated filesystem;
@@ -262,6 +264,18 @@ touch %s
 		// Non-JSON debug lines are gracefully skipped by ParseLogMetrics.
 		"DEBUG": "gemini-cli:*",
 	}
+	// Indicate the phase: "agent" for the main run, "detection" for threat detection
+	// Include the compiler version so agents can identify which gh-aw version generated the workflow
+	if workflowData.IsDetectionRun {
+		env["GH_AW_PHASE"] = "detection"
+	} else {
+		env["GH_AW_PHASE"] = "agent"
+	}
+	if IsRelease() {
+		env["GH_AW_VERSION"] = GetVersion()
+	} else {
+		env["GH_AW_VERSION"] = "dev"
+	}
 
 	// Add MCP config env var if needed (points to .gemini/settings.json for Gemini)
 	if HasMCPServers(workflowData) {
@@ -272,6 +286,11 @@ touch %s
 	// LLM gateway sidecar instead of the real googleapis.com endpoint.
 	if firewallEnabled {
 		env["GEMINI_API_BASE_URL"] = fmt.Sprintf("http://host.docker.internal:%d", constants.GeminiLLMGatewayPort)
+
+		// Set git identity environment variables so the first git commit succeeds inside the
+		// container. AWF's --env-all forwards these to the container, ensuring git does not
+		// rely on the host-side ~/.gitconfig which is not visible in the sandbox.
+		maps.Copy(env, getGitIdentityEnvVars())
 	}
 
 	// Add safe outputs env

@@ -1879,11 +1879,20 @@
             }
           },
           "secrets": {
-            "type": "object",
-            "description": "Secrets to pass to the reusable workflow. Values must be GitHub Actions expressions referencing secrets (e.g., ${{ secrets.MY_SECRET }} or ${{ secrets.SECRET1 || secrets.SECRET2 }}).",
-            "additionalProperties": {
-              "$ref": "#/$defs/github_token"
-            }
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "inherit",
+                "description": "Pass all secrets from the caller workflow to the reusable workflow."
+              },
+              {
+                "type": "object",
+                "description": "Secrets to pass to the reusable workflow. Values must be GitHub Actions expressions referencing secrets (e.g., ${{ secrets.MY_SECRET }} or ${{ secrets.SECRET1 || secrets.SECRET2 }}).",
+                "additionalProperties": {
+                  "$ref": "#/$defs/github_token"
+                }
+              }
+            ]
           }
         }
       }
@@ -1956,13 +1965,21 @@
             "cancel-in-progress": {
               "type": "boolean",
               "description": "Whether to cancel in-progress workflows in the same concurrency group when a new one starts. Default: false (queue new runs). Set to true for agentic workflows where only the latest run matters (e.g., PR analysis that becomes stale when new commits are pushed)."
+            },
+            "job-discriminator": {
+              "type": "string",
+              "description": "Additional discriminator expression appended to compiler-generated job-level concurrency groups (agent, output jobs). Use this when multiple workflow instances are dispatched concurrently with different inputs (fan-out pattern) to prevent job-level concurrency groups from colliding. For example, '${{ inputs.finding_id }}' ensures each dispatched run gets a unique job-level group. Supports GitHub Actions expressions. This field is stripped from the compiled lock file (it is a gh-aw extension, not a GitHub Actions field).",
+              "examples": ["${{ inputs.finding_id }}", "${{ inputs.item_id }}", "${{ github.run_id }}"]
             }
           },
-          "required": ["group"],
+          "required": [],
           "examples": [
             {
               "group": "dev-workflow-${{ github.ref }}",
               "cancel-in-progress": true
+            },
+            {
+              "job-discriminator": "${{ inputs.finding_id }}"
             }
           ]
         }
@@ -3016,19 +3033,19 @@
                   "examples": [["/data:/data:ro", "/tmp:/tmp:rw"], ["/opt:/opt:ro"]]
                 },
                 "repos": {
-                  "description": "Guard policy: repository access configuration. Restricts which repositories the agent can access. Use 'all' to allow all repos or an array of 'owner/repo' strings.",
+                  "description": "Guard policy: repository access configuration. Restricts which repositories the agent can access. Use 'all' to allow all repos, 'public' for public repositories only, or an array of repository patterns (e.g., 'owner/repo', 'owner/*', 'owner/prefix*').",
                   "oneOf": [
                     {
                       "type": "string",
-                      "enum": ["all"],
-                      "description": "Allow access to all repositories"
+                      "enum": ["all", "public"],
+                      "description": "Allow access to all repositories ('all') or only public repositories ('public')"
                     },
                     {
                       "type": "array",
-                      "description": "Allow access to specific repositories",
+                      "description": "Allow access to specific repositories using patterns (e.g., 'owner/repo', 'owner/*', 'owner/prefix*')",
                       "items": {
                         "type": "string",
-                        "description": "Repository slug in the format 'owner/repo'"
+                        "description": "Repository pattern in the format 'owner/repo', 'owner/*' (all repos under owner), or 'owner/prefix*' (repos with name prefix)"
                       },
                       "minItems": 1
                     }
@@ -3037,7 +3054,7 @@
                 "min-integrity": {
                   "type": "string",
                   "description": "Guard policy: minimum required integrity level for repository access. Restricts the agent to users with at least the specified permission level.",
-                  "enum": ["reader", "writer", "maintainer", "admin"]
+                  "enum": ["none", "unapproved", "approved", "merged"]
                 },
                 "github-app": {
                   "type": "object",
@@ -3652,6 +3669,12 @@
                   "maximum": 1000,
                   "description": "Maximum file count per commit (default: 100)"
                 },
+                "max-patch-size": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 102400,
+                  "description": "Maximum total patch size in bytes (default: 10240 = 10KB, max: 102400 = 100KB). The total size of the git diff must not exceed this value."
+                },
                 "description": {
                   "type": "string",
                   "description": "Optional description for the memory that will be shown in the agent prompt"
@@ -3736,6 +3759,12 @@
                     "minimum": 1,
                     "maximum": 1000,
                     "description": "Maximum file count per commit (default: 100)"
+                  },
+                  "max-patch-size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 102400,
+                    "description": "Maximum total patch size in bytes (default: 10240 = 10KB, max: 102400 = 100KB). The total size of the git diff must not exceed this value."
                   },
                   "description": {
                     "type": "string",
@@ -5281,6 +5310,13 @@
                   "enum": ["blocked", "allowed", "fallback-to-issue"],
                   "description": "Controls protected-file protection. blocked (default): hard-block any patch that modifies package manifests (e.g. package.json, go.mod), engine instruction files (e.g. AGENTS.md, CLAUDE.md) or .github/ files. allowed: allow all changes. fallback-to-issue: push the branch but create a review issue instead of a PR, so a human can review the manifest changes before merging.",
                   "default": "blocked"
+                },
+                "allowed-files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern — files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
                 }
               },
               "additionalProperties": false,
@@ -6315,6 +6351,13 @@
                   "enum": ["blocked", "allowed", "fallback-to-issue"],
                   "description": "Controls protected-file protection. blocked (default): hard-block any patch that modifies package manifests (e.g. package.json, go.mod), engine instruction files (e.g. AGENTS.md, CLAUDE.md) or .github/ files. allowed: allow all changes. fallback-to-issue: create a review issue instead of pushing to the PR branch, so a human can review the changes before applying.",
                   "default": "blocked"
+                },
+                "allowed-files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern — files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
                 }
               },
               "additionalProperties": false
@@ -7149,6 +7192,18 @@
           "default": false,
           "examples": [false, true]
         },
+        "report-failure-as-issue": {
+          "type": "boolean",
+          "description": "When false, disables creating failure tracking issues when workflows fail. Useful for workflows where failures are expected or handled elsewhere. Defaults to true.",
+          "default": true,
+          "examples": [false, true]
+        },
+        "failure-issue-repo": {
+          "type": "string",
+          "description": "Repository to create failure tracking issues in, in the format 'owner/repo'. Useful when the current repository has issues disabled. Defaults to the current repository.",
+          "pattern": "^[^/]+/[^/]+$",
+          "examples": ["github/docs-engineering", "myorg/infra-alerts"]
+        },
         "max-bot-mentions": {
           "description": "Maximum number of bot trigger references (e.g. 'fixes #123', 'closes #456') allowed in output before all of them are neutralized. Default: 10. Supports integer or GitHub Actions expression (e.g. '${{ inputs.max-bot-mentions }}').",
           "oneOf": [
@@ -7174,6 +7229,31 @@
           "type": "string",
           "description": "Concurrency group for the safe-outputs job. When set, the safe-outputs job will use this concurrency group with cancel-in-progress: false. Supports GitHub Actions expressions.",
           "examples": ["my-workflow-safe-outputs", "safe-outputs-${{ github.repository }}"]
+        },
+        "environment": {
+          "description": "Override the GitHub deployment environment for the safe-outputs job. When set, this environment is used instead of the top-level environment: field. When not set, the top-level environment: field is propagated automatically so that environment-scoped secrets are accessible in the safe-outputs job.",
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Environment name as a string"
+            },
+            {
+              "type": "object",
+              "description": "Environment object with name and optional URL",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The name of the environment configured in the repo"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "A deployment URL"
+                }
+              },
+              "required": ["name"],
+              "additionalProperties": false
+            }
+          ]
         },
         "runs-on": {
           "type": "string",
@@ -7305,9 +7385,9 @@
       "description": "Mark the workflow as private, preventing it from being added to other repositories via 'gh aw add'. A workflow with private: true is not meant to be shared outside its repository.",
       "examples": [true, false]
     },
-    "safe-inputs": {
+    "mcp-scripts": {
       "type": "object",
-      "description": "Safe inputs configuration for defining custom lightweight MCP tools as JavaScript, shell scripts, or Python scripts. Tools are mounted in an MCP server and have access to secrets specified by the user. Only one of 'script' (JavaScript), 'run' (shell), or 'py' (Python) must be specified per tool.",
+      "description": "MCP Scripts configuration for defining custom lightweight MCP tools as JavaScript, shell scripts, or Python scripts. Tools are mounted in an MCP server and have access to secrets specified by the user. Only one of 'script' (JavaScript), 'run' (shell), or 'py' (Python) must be specified per tool.",
       "patternProperties": {
         "^([a-ln-z][a-z0-9_-]*|m[a-np-z][a-z0-9_-]*|mo[a-ce-z][a-z0-9_-]*|mod[a-df-z][a-z0-9_-]*|mode[a-z0-9_-]+)$": {
           "type": "object",
@@ -7542,14 +7622,40 @@
       ]
     },
     "dependencies": {
-      "description": "List of APM package references to install (e.g., 'org/repo' or 'org/repo/path/to/skill').",
-      "examples": [["microsoft/apm-sample-package", "acme/custom-tools"]],
-      "type": "array",
-      "items": {
-        "type": "string",
-        "pattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+$",
-        "description": "APM package reference in the format 'org/repo' or 'org/repo/path/to/skill'"
-      }
+      "description": "APM package references to install. Supports array format (list of package slugs) or object format with packages and isolated fields.",
+      "examples": [["microsoft/apm-sample-package", "acme/custom-tools"], { "packages": ["microsoft/apm-sample-package"], "isolated": true }],
+      "oneOf": [
+        {
+          "type": "array",
+          "description": "Simple array of APM package references.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+$",
+            "description": "APM package reference in the format 'org/repo' or 'org/repo/path/to/skill'"
+          }
+        },
+        {
+          "type": "object",
+          "description": "Object format with packages and optional isolated flag.",
+          "properties": {
+            "packages": {
+              "type": "array",
+              "description": "List of APM package references to install.",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+$",
+                "description": "APM package reference in the format 'org/repo' or 'org/repo/path/to/skill'"
+              }
+            },
+            "isolated": {
+              "type": "boolean",
+              "description": "If true, agent restore step clears primitive dirs before unpacking."
+            }
+          },
+          "required": ["packages"],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -7698,13 +7804,55 @@
             "group": "gh-aw-claude",
             "cancel-in-progress": false
           }
+        },
+        {
+          "runtime": {
+            "id": "codex",
+            "version": "0.105.0"
+          },
+          "provider": {
+            "id": "openai",
+            "model": "gpt-5",
+            "auth": {
+              "secret": "OPENAI_API_KEY"
+            }
+          }
+        },
+        {
+          "runtime": {
+            "id": "claude"
+          },
+          "provider": {
+            "model": "claude-3-7-sonnet-20250219"
+          }
+        },
+        {
+          "runtime": {
+            "id": "codex"
+          },
+          "provider": {
+            "id": "azure-openai",
+            "model": "gpt-4o",
+            "auth": {
+              "strategy": "oauth-client-credentials",
+              "token-url": "https://auth.example.com/oauth/token",
+              "client-id": "AZURE_CLIENT_ID",
+              "client-secret": "AZURE_CLIENT_SECRET",
+              "header-name": "api-key"
+            },
+            "request": {
+              "path-template": "/openai/deployments/{model}/chat/completions",
+              "query": {
+                "api-version": "2024-10-01-preview"
+              }
+            }
+          }
         }
       ],
       "oneOf": [
         {
           "type": "string",
-          "enum": ["claude", "codex", "copilot", "gemini"],
-          "description": "Simple engine name: 'claude' (default, Claude Code), 'copilot' (GitHub Copilot CLI), 'codex' (OpenAI Codex CLI), or 'gemini' (Google Gemini CLI)"
+          "description": "Engine name: built-in ('claude', 'codex', 'copilot', 'gemini') or a named catalog entry"
         },
         {
           "type": "object",
@@ -7712,8 +7860,7 @@
           "properties": {
             "id": {
               "type": "string",
-              "enum": ["claude", "codex", "copilot", "gemini"],
-              "description": "AI engine identifier: 'claude' (Claude Code), 'codex' (OpenAI Codex CLI), 'copilot' (GitHub Copilot CLI), or 'gemini' (Google Gemini CLI)"
+              "description": "AI engine identifier: built-in ('claude', 'codex', 'copilot', 'gemini') or a named catalog entry"
             },
             "version": {
               "type": ["string", "number"],
@@ -7833,6 +7980,259 @@
             }
           },
           "required": ["id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Inline engine definition: specifies a runtime adapter and optional provider settings directly in the workflow frontmatter, without requiring a named catalog entry",
+          "properties": {
+            "runtime": {
+              "type": "object",
+              "description": "Runtime adapter reference for the inline engine definition",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Runtime adapter identifier (e.g. 'codex', 'claude', 'copilot', 'gemini')",
+                  "examples": ["codex", "claude", "copilot", "gemini"]
+                },
+                "version": {
+                  "type": ["string", "number"],
+                  "description": "Optional version of the runtime adapter (e.g. '0.105.0', 'beta')",
+                  "examples": ["0.105.0", "beta", "latest"]
+                }
+              },
+              "required": ["id"],
+              "additionalProperties": false
+            },
+            "provider": {
+              "type": "object",
+              "description": "Optional provider configuration for the inline engine definition",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Provider identifier (e.g. 'openai', 'anthropic', 'github', 'google')",
+                  "examples": ["openai", "anthropic", "github", "google"]
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Optional specific LLM model to use (e.g. 'gpt-5', 'claude-3-5-sonnet-20241022')",
+                  "examples": ["gpt-5", "claude-3-5-sonnet-20241022", "gpt-4o"]
+                },
+                "auth": {
+                  "type": "object",
+                  "description": "Authentication configuration for the provider",
+                  "properties": {
+                    "secret": {
+                      "type": "string",
+                      "description": "Name of the GitHub Actions secret that contains the API key for this provider",
+                      "examples": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CUSTOM_API_KEY"]
+                    },
+                    "strategy": {
+                      "type": "string",
+                      "enum": ["api-key", "oauth-client-credentials", "bearer"],
+                      "description": "Authentication strategy for the provider (default: api-key when secret is set)"
+                    },
+                    "token-url": {
+                      "type": "string",
+                      "description": "OAuth 2.0 token endpoint URL. Required when strategy is 'oauth-client-credentials'.",
+                      "examples": ["https://auth.example.com/oauth/token"]
+                    },
+                    "client-id": {
+                      "type": "string",
+                      "description": "GitHub Actions secret name that holds the OAuth client ID. Required when strategy is 'oauth-client-credentials'.",
+                      "examples": ["OAUTH_CLIENT_ID"]
+                    },
+                    "client-secret": {
+                      "type": "string",
+                      "description": "GitHub Actions secret name that holds the OAuth client secret. Required when strategy is 'oauth-client-credentials'.",
+                      "examples": ["OAUTH_CLIENT_SECRET"]
+                    },
+                    "token-field": {
+                      "type": "string",
+                      "description": "JSON field name in the token response that contains the access token. Defaults to 'access_token'.",
+                      "examples": ["access_token", "token"]
+                    },
+                    "header-name": {
+                      "type": "string",
+                      "description": "HTTP header name to inject the API key or token into (e.g. 'api-key', 'x-api-key'). Required when strategy is not 'bearer'.",
+                      "examples": ["api-key", "x-api-key", "Authorization"]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "request": {
+                  "type": "object",
+                  "description": "Request shaping configuration for non-standard provider URL and body transformations",
+                  "properties": {
+                    "path-template": {
+                      "type": "string",
+                      "description": "URL path template with {model} and other variable placeholders (e.g. '/openai/deployments/{model}/chat/completions')",
+                      "examples": ["/openai/deployments/{model}/chat/completions"]
+                    },
+                    "query": {
+                      "type": "object",
+                      "description": "Static or template query-parameter values appended to every request",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "examples": [
+                        {
+                          "api-version": "2024-10-01-preview"
+                        }
+                      ]
+                    },
+                    "body-inject": {
+                      "type": "object",
+                      "description": "Key/value pairs injected into the JSON request body before sending",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "examples": [
+                        {
+                          "appKey": "{APP_KEY_SECRET}"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["runtime"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Engine definition: full declarative metadata for a named engine entry (used in builtin engine shared workflow files such as @builtin:engines/*.md)",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Unique engine identifier (e.g. 'copilot', 'claude', 'codex', 'gemini')"
+            },
+            "display-name": {
+              "type": "string",
+              "description": "Human-readable display name for the engine"
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable description of the engine"
+            },
+            "runtime-id": {
+              "type": "string",
+              "description": "Runtime adapter identifier. Maps to the CodingAgentEngine registered in the engine registry. Defaults to id when omitted."
+            },
+            "provider": {
+              "type": "object",
+              "description": "Provider metadata for the engine",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Provider name (e.g. 'anthropic', 'github', 'google', 'openai')"
+                },
+                "auth": {
+                  "type": "object",
+                  "description": "Default authentication configuration for the provider",
+                  "properties": {
+                    "secret": {
+                      "type": "string",
+                      "description": "Name of the GitHub Actions secret that contains the API key"
+                    },
+                    "strategy": {
+                      "type": "string",
+                      "enum": ["api-key", "oauth-client-credentials", "bearer"],
+                      "description": "Authentication strategy"
+                    },
+                    "token-url": {
+                      "type": "string",
+                      "description": "OAuth 2.0 token endpoint URL"
+                    },
+                    "client-id": {
+                      "type": "string",
+                      "description": "GitHub Actions secret name for the OAuth client ID"
+                    },
+                    "client-secret": {
+                      "type": "string",
+                      "description": "GitHub Actions secret name for the OAuth client secret"
+                    },
+                    "token-field": {
+                      "type": "string",
+                      "description": "JSON field name in the token response containing the access token"
+                    },
+                    "header-name": {
+                      "type": "string",
+                      "description": "HTTP header name to inject the API key or token into"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "request": {
+                  "type": "object",
+                  "description": "Request shaping configuration",
+                  "properties": {
+                    "path-template": {
+                      "type": "string",
+                      "description": "URL path template with variable placeholders"
+                    },
+                    "query": {
+                      "type": "object",
+                      "description": "Static query parameters",
+                      "additionalProperties": { "type": "string" }
+                    },
+                    "body-inject": {
+                      "type": "object",
+                      "description": "Key/value pairs injected into the JSON request body",
+                      "additionalProperties": { "type": "string" }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "models": {
+              "type": "object",
+              "description": "Model selection configuration for the engine",
+              "properties": {
+                "default": {
+                  "type": "string",
+                  "description": "Default model identifier"
+                },
+                "supported": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "List of supported model identifiers"
+                }
+              },
+              "additionalProperties": false
+            },
+            "auth": {
+              "type": "array",
+              "description": "Authentication bindings — maps logical roles (e.g. 'api-key') to GitHub Actions secret names",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "description": "Logical authentication role (e.g. 'api-key', 'token')"
+                  },
+                  "secret": {
+                    "type": "string",
+                    "description": "Name of the GitHub Actions secret that provides credentials for this role"
+                  }
+                },
+                "required": ["role", "secret"],
+                "additionalProperties": false
+              }
+            },
+            "options": {
+              "type": "object",
+              "description": "Additional engine-specific options",
+              "additionalProperties": true
+            }
+          },
+          "required": ["id", "display-name"],
           "additionalProperties": false
         }
       ]

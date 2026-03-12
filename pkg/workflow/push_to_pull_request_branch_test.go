@@ -305,6 +305,12 @@ This workflow has minimal push-to-pull-request-branch configuration.
 	if !strings.Contains(lockContentStr, "contains(needs.agent.outputs.output_types, 'push_to_pull_request_branch')") {
 		t.Errorf("Generated workflow should have safe output type condition")
 	}
+
+	// Verify that the default max is 1 (not 0) when not explicitly set
+	if !strings.Contains(lockContentStr, `"push_to_pull_request_branch":{"max":1}`) &&
+		!strings.Contains(lockContentStr, `"push_to_pull_request_branch": {"max": 1}`) {
+		t.Errorf("Expected push_to_pull_request_branch default max to be 1, got content: %s", lockContentStr)
+	}
 }
 
 func TestPushToPullRequestBranchWithIfNoChangesError(t *testing.T) {
@@ -871,9 +877,9 @@ This test verifies that the aw-*.patch artifact is downloaded in the safe_output
 		t.Errorf("Expected 'Download patch artifact' step in safe_outputs job when push-to-pull-request-branch is enabled")
 	}
 
-	// Verify that patch is downloaded from unified agent-artifacts
-	if !strings.Contains(lockContentStr, "name: agent-artifacts") {
-		t.Errorf("Expected patch to be downloaded from 'agent-artifacts' unified artifact")
+	// Verify that patch is downloaded from unified agent artifact
+	if !strings.Contains(lockContentStr, "name: agent\n") {
+		t.Errorf("Expected patch to be downloaded from unified 'agent' artifact")
 	}
 
 	if !strings.Contains(lockContentStr, "path: /tmp/gh-aw/") {

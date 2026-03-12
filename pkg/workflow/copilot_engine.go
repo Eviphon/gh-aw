@@ -55,6 +55,11 @@ func (e *CopilotEngine) GetDefaultDetectionModel() string {
 	return string(constants.DefaultCopilotDetectionModel)
 }
 
+// GetAPMTarget returns "copilot" so that apm-action packs Copilot-specific primitives.
+func (e *CopilotEngine) GetAPMTarget() string {
+	return "copilot"
+}
+
 // GetModelEnvVarName returns the native environment variable name that the Copilot CLI uses
 // for model selection. Setting COPILOT_MODEL is equivalent to passing --model to the CLI.
 func (e *CopilotEngine) GetModelEnvVarName() string {
@@ -88,14 +93,14 @@ func (e *CopilotEngine) GetRequiredSecretNames(workflowData *WorkflowData) []str
 		copilotLog.Printf("Added %d HTTP MCP header secrets", len(headerSecrets))
 	}
 
-	// Add safe-inputs secret names
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName := range safeInputsSecrets {
+	// Add mcp-scripts secret names
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName := range mcpScriptsSecrets {
 			secrets = append(secrets, varName)
 		}
-		if len(safeInputsSecrets) > 0 {
-			copilotLog.Printf("Added %d safe-inputs secrets", len(safeInputsSecrets))
+		if len(mcpScriptsSecrets) > 0 {
+			copilotLog.Printf("Added %d mcp-scripts secrets", len(mcpScriptsSecrets))
 		}
 	}
 

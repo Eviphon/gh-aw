@@ -87,10 +87,11 @@ type PluginsConfig struct {
 }
 
 // APMDependenciesInfo encapsulates APM (Agent Package Manager) dependency configuration.
-// Supports both simple array format (list of package slugs) and object format with
-// an "apm" sub-key. When present, a microsoft/apm-action setup step is emitted.
+// Supports simple array format and object format with packages and isolated fields.
+// When present, a pack step is emitted in the activation job and a restore step in the agent job.
 type APMDependenciesInfo struct {
 	Packages []string // APM package slugs to install (e.g., "org/package")
+	Isolated bool     // If true, agent restore step clears primitive dirs before unpacking
 }
 
 // RateLimitConfig represents rate limiting configuration for workflow triggers
@@ -124,7 +125,7 @@ type FrontmatterConfig struct {
 	Runtimes         map[string]any     `json:"runtimes,omitempty"`    // Deprecated: use RuntimesTyped
 	Jobs             map[string]any     `json:"jobs,omitempty"`        // Custom workflow jobs (too dynamic to type)
 	SafeOutputs      *SafeOutputsConfig `json:"safe-outputs,omitempty"`
-	SafeInputs       *SafeInputsConfig  `json:"safe-inputs,omitempty"`
+	MCPScripts       *MCPScriptsConfig  `json:"mcp-scripts,omitempty"`
 	PermissionsTyped *PermissionsConfig `json:"-"` // New typed field (not in JSON to avoid conflict)
 
 	// Event and trigger configuration
@@ -535,9 +536,9 @@ func (fc *FrontmatterConfig) ToMap() map[string]any {
 		// Convert SafeOutputsConfig to map - would need a ToMap method
 		result["safe-outputs"] = fc.SafeOutputs
 	}
-	if fc.SafeInputs != nil {
-		// Convert SafeInputsConfig to map - would need a ToMap method
-		result["safe-inputs"] = fc.SafeInputs
+	if fc.MCPScripts != nil {
+		// Convert MCPScriptsConfig to map - would need a ToMap method
+		result["mcp-scripts"] = fc.MCPScripts
 	}
 
 	// Event and trigger configuration

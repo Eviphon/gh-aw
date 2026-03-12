@@ -75,9 +75,9 @@ echo "Looking for PRs merged since: $DATE_24H_AGO"
 
 **Step 1.2: Search for Merged Copilot PRs**
 
-Use the `safeinputs-gh` safe-input tool to search for merged PRs from Copilot:
+Use the `mcpscripts-gh` mcp-script tool to search for merged PRs from Copilot:
 ```
-safeinputs-gh with args: "pr list --repo ${{ github.repository }} --search \"head:copilot/ is:merged merged:>=$DATE_24H_AGO\" --state merged --limit 100 --json number,title,mergedAt,additions,deletions,files,url"
+mcpscripts-gh with args: "pr list --repo ${{ github.repository }} --search \"head:copilot/ is:merged merged:>=$DATE_24H_AGO\" --state merged --limit 100 --json number,title,mergedAt,additions,deletions,files,url"
 ```
 
 This searches for:
@@ -88,7 +88,7 @@ This searches for:
 
 **Step 1.3: Parse Results**
 
-Parse the JSON output from the safeinputs-gh tool to extract:
+Parse the JSON output from the mcpscripts-gh tool to extract:
 - List of PR numbers
 - Total number of merged PRs
 - Sum of lines added across all PRs
@@ -103,9 +103,9 @@ For each merged PR found in Phase 1:
 
 **Step 2.1: Get PR Files**
 
-Use the `safeinputs-gh` tool to get detailed file information:
+Use the `mcpscripts-gh` tool to get detailed file information:
 ```
-safeinputs-gh with args: "pr view <PR_NUMBER> --repo ${{ github.repository }} --json files"
+mcpscripts-gh with args: "pr view <PR_NUMBER> --repo ${{ github.repository }} --json files"
 ```
 
 **Step 2.2: Count Test Files**
@@ -122,19 +122,19 @@ For token usage information, we need to find the workflow run associated with th
 
 1. Get commits from the PR:
    ```
-   safeinputs-gh with args: "pr view <PR_NUMBER> --repo ${{ github.repository }} --json commits"
+   mcpscripts-gh with args: "pr view <PR_NUMBER> --repo ${{ github.repository }} --json commits"
    ```
 
 2. For the latest commit, find associated workflow runs:
    ```
-   safeinputs-gh with args: "api repos/${{ github.repository }}/commits/<COMMIT_SHA>/check-runs"
+   mcpscripts-gh with args: "api repos/${{ github.repository }}/commits/<COMMIT_SHA>/check-runs"
    ```
 
 3. From the check runs, identify GitHub Actions workflow runs
 
 4. Get workflow run usage data:
    ```
-   safeinputs-gh with args: "api repos/${{ github.repository }}/actions/runs/<RUN_ID>/timing"
+   mcpscripts-gh with args: "api repos/${{ github.repository }}/actions/runs/<RUN_ID>/timing"
    ```
 
    This returns timing information including billable time.
@@ -150,9 +150,9 @@ For token usage information, we need to find the workflow run associated with th
 Create a concise report with the following structure:
 
 ```markdown
-# 🤖 Daily Copilot PR Merged Report - [DATE]
+### 🤖 Daily Copilot PR Merged Report - [DATE]
 
-## Summary
+#### Summary
 
 **Analysis Period**: Last 24 hours (merged PRs only)  
 **Total Merged PRs**: [count]  
@@ -160,19 +160,30 @@ Create a concise report with the following structure:
 **Total Lines Deleted**: [count]  
 **Net Code Change**: [+/- count] lines
 
-## Merged Pull Requests
+#### 💡 Insights
+
+[Provide 1-2 brief observations about the merged PRs, such as:]
+- Trends in code generation volume
+- Notable test coverage patterns
+- Any PRs with exceptional metrics (very large, many test files, etc.)
+
+<details>
+<summary><b>Merged Pull Requests</b></summary>
 
 | PR # | Title | Lines Added | Lines Deleted | Test Files | Merged At |
 |------|-------|-------------|---------------|------------|-----------|
 | [#123](url) | [title] | [count] | [count] | [count] | [time] |
 
-## Code Generation Metrics
+</details>
+
+<details>
+<summary><b>Code Generation Metrics</b></summary>
 
 - **Production Code**: [lines added - test lines added] lines
 - **Test Code**: [test lines added] lines
 - **Code-to-Test Ratio**: [ratio]
 
-## Test Coverage
+#### Test Coverage
 
 - **Total Test Files Modified/Added**: [count]
 - **Test File Types**:
@@ -180,7 +191,7 @@ Create a concise report with the following structure:
   - JavaScript tests (`*.test.js`): [count]
   - .NET tests (`*Tests.cs`, `*Test.cs`): [count]
 
-## Workflow Execution
+#### Workflow Execution
 
 - **Total Workflow Runs**: [count]
 - **Total Billable Time**: [milliseconds] ms ([minutes] min)
@@ -188,12 +199,7 @@ Create a concise report with the following structure:
 
 **Note**: Token consumption data is not directly available via GitHub API. Workflow execution time is used as a proxy for resource usage.
 
-## Insights
-
-[Provide 1-2 brief observations about the merged PRs, such as:]
-- Trends in code generation volume
-- Notable test coverage patterns
-- Any PRs with exceptional metrics (very large, many test files, etc.)
+</details>
 
 ---
 
@@ -232,7 +238,7 @@ Use the safe-outputs `create-discussion` functionality to publish the report:
 **No Merged PRs**:
 If no Copilot PRs were merged in the last 24 hours:
 ```markdown
-# 🤖 Daily Copilot PR Merged Report - [DATE]
+### 🤖 Daily Copilot PR Merged Report - [DATE]
 
 No Copilot coding agent pull requests were merged in the last 24 hours.
 
@@ -263,7 +269,7 @@ A successful report:
 - ✅ Creates discussion in "audits" category
 - ✅ Completes within 10-minute timeout
 
-Begin your analysis now. Use the `gh` safe-input tool for all GitHub CLI operations.
+Begin your analysis now. Use the `gh` mcp-script tool for all GitHub CLI operations.
 
 **Important**: If no action is needed after completing your analysis, you **MUST** call the `noop` safe-output tool with a brief explanation. Failing to call any safe-output tool is the most common cause of safe-output workflow failures.
 

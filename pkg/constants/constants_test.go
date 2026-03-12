@@ -83,7 +83,7 @@ func TestAgenticEngines(t *testing.T) {
 		t.Error("AgenticEngines should not be empty")
 	}
 
-	expectedEngines := []string{"claude", "codex", "copilot"}
+	expectedEngines := []string{"claude", "codex", "copilot", "gemini"}
 	if len(AgenticEngines) != len(expectedEngines) {
 		t.Errorf("AgenticEngines length = %d, want %d", len(AgenticEngines), len(expectedEngines))
 	}
@@ -103,6 +103,9 @@ func TestAgenticEngines(t *testing.T) {
 	}
 	if string(CopilotEngine) != "copilot" {
 		t.Errorf("CopilotEngine constant = %q, want %q", CopilotEngine, "copilot")
+	}
+	if string(GeminiEngine) != "gemini" {
+		t.Errorf("GeminiEngine constant = %q, want %q", GeminiEngine, "gemini")
 	}
 }
 
@@ -320,7 +323,7 @@ func TestFeatureFlagConstants(t *testing.T) {
 		value    FeatureFlag
 		expected string
 	}{
-		{"SafeInputsFeatureFlag", SafeInputsFeatureFlag, "safe-inputs"},
+		{"MCPScriptsFeatureFlag", MCPScriptsFeatureFlag, "mcp-scripts"},
 		{"MCPGatewayFeatureFlag", MCPGatewayFeatureFlag, "mcp-gateway"},
 		{"DisableXPIAPromptFeatureFlag", DisableXPIAPromptFeatureFlag, "disable-xpia-prompt"},
 	}
@@ -342,9 +345,9 @@ func TestFeatureFlagType(t *testing.T) {
 	}
 
 	// Test that constants can be assigned to FeatureFlag variables
-	safeInputsFlag := SafeInputsFeatureFlag
-	if safeInputsFlag != "safe-inputs" {
-		t.Errorf("SafeInputsFeatureFlag assignment failed: got %q, want %q", safeInputsFlag, "safe-inputs")
+	mcpScriptsFlag := MCPScriptsFeatureFlag
+	if mcpScriptsFlag != "mcp-scripts" {
+		t.Errorf("MCPScriptsFeatureFlag assignment failed: got %q, want %q", mcpScriptsFlag, "mcp-scripts")
 	}
 }
 

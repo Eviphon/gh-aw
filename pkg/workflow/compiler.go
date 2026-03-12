@@ -156,6 +156,10 @@ func (c *Compiler) validateWorkflowData(workflowData *WorkflowData, markdownPath
 		return formatCompilerError(markdownPath, "error", err.Error(), err)
 	}
 
+	// Emit warnings for push-to-pull-request-branch misconfiguration
+	log.Printf("Validating push-to-pull-request-branch configuration")
+	c.validatePushToPullRequestBranchWarnings(workflowData.SafeOutputs, workflowData.CheckoutConfigs)
+
 	// Validate network allowed domains configuration
 	log.Printf("Validating network allowed domains")
 	if err := c.validateNetworkAllowedDomains(workflowData.NetworkPermissions); err != nil {
@@ -185,6 +189,13 @@ func (c *Compiler) validateWorkflowData(workflowData *WorkflowData, markdownPath
 			if err := validateConcurrencyGroupExpression(groupExpr); err != nil {
 				return formatCompilerError(markdownPath, "error", "workflow-level concurrency validation failed: "+err.Error(), err)
 			}
+		}
+	}
+
+	// Validate concurrency.job-discriminator expression
+	if workflowData.ConcurrencyJobDiscriminator != "" {
+		if err := validateConcurrencyGroupExpression(workflowData.ConcurrencyJobDiscriminator); err != nil {
+			return formatCompilerError(markdownPath, "error", "concurrency.job-discriminator validation failed: "+err.Error(), err)
 		}
 	}
 
@@ -233,9 +244,9 @@ func (c *Compiler) validateWorkflowData(workflowData *WorkflowData, markdownPath
 		c.IncrementWarningCount()
 	}
 
-	// Emit experimental warning for safe-inputs feature
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Using experimental feature: safe-inputs"))
+	// Emit experimental warning for mcp-scripts feature
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Using experimental feature: mcp-scripts"))
 		c.IncrementWarningCount()
 	}
 

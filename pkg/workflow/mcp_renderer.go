@@ -12,7 +12,7 @@
 //   - Engine-specific format handling (JSON-like vs TOML-like)
 //   - GitHub MCP server configuration (local Docker and remote hosted)
 //   - Playwright MCP server configuration
-//   - Safe-outputs and safe-inputs MCP server configuration
+//   - Safe-outputs and mcp-scripts MCP server configuration
 //   - Agentic-workflows MCP server configuration
 //   - Cache-memory MCP server configuration
 //   - Serena MCP server configuration
@@ -30,7 +30,7 @@
 //   - GitHub: Local (Docker) or remote (hosted) GitHub API access
 //   - Playwright: Browser automation with domain restrictions
 //   - Safe-outputs: Controlled output storage for AI agents
-//   - Safe-inputs: Custom tool execution with secret passthrough
+//   - MCP Scripts: Custom tool execution with secret passthrough
 //   - Cache-memory: Memory/knowledge base management
 //   - Agentic-workflows: Workflow execution via gh-aw extension
 //   - Serena: Local search functionality
@@ -330,7 +330,7 @@ func (r *MCPConfigRendererUnified) RenderSafeOutputsMCP(yaml *strings.Builder, w
 }
 
 // renderSafeOutputsTOML generates Safe Outputs MCP configuration in TOML format
-// Now uses HTTP transport instead of stdio, similar to safe-inputs
+// Now uses HTTP transport instead of stdio, similar to mcp-scripts
 func (r *MCPConfigRendererUnified) renderSafeOutputsTOML(yaml *strings.Builder, workflowData *WorkflowData) {
 	// Determine host based on whether agent is disabled
 	host := "host.docker.internal"
@@ -346,26 +346,39 @@ func (r *MCPConfigRendererUnified) renderSafeOutputsTOML(yaml *strings.Builder, 
 	yaml.WriteString("          \n")
 	yaml.WriteString("          [mcp_servers." + constants.SafeOutputsMCPServerID.String() + ".headers]\n")
 	yaml.WriteString("          Authorization = \"$GH_AW_SAFE_OUTPUTS_API_KEY\"\n")
+
+	// Check if GitHub tool has guard-policies configured
+	// If so, generate a linked write-sink guard-policy for safeoutputs
+	if workflowData != nil && workflowData.Tools != nil {
+		if githubTool, hasGitHub := workflowData.Tools["github"]; hasGitHub {
+			guardPolicies := deriveSafeOutputsGuardPolicyFromGitHub(githubTool)
+			if len(guardPolicies) > 0 {
+				mcpRendererLog.Print("Adding guard-policies to safeoutputs TOML (derived from GitHub guard-policy)")
+				// Render guard-policies in TOML format
+				renderGuardPoliciesToml(yaml, guardPolicies, constants.SafeOutputsMCPServerID.String())
+			}
+		}
+	}
 }
 
-// RenderSafeInputsMCP generates the Safe Inputs MCP server configuration
-func (r *MCPConfigRendererUnified) RenderSafeInputsMCP(yaml *strings.Builder, safeInputs *SafeInputsConfig, workflowData *WorkflowData) {
-	mcpRendererLog.Printf("Rendering Safe Inputs MCP: format=%s", r.options.Format)
+// RenderMCPScriptsMCP generates the MCP Scripts server configuration
+func (r *MCPConfigRendererUnified) RenderMCPScriptsMCP(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, workflowData *WorkflowData) {
+	mcpRendererLog.Printf("Rendering MCP Scripts: format=%s", r.options.Format)
 
 	if r.options.Format == "toml" {
-		r.renderSafeInputsTOML(yaml, safeInputs, workflowData)
+		r.renderMCPScriptsTOML(yaml, mcpScripts, workflowData)
 		return
 	}
 
 	// JSON format
-	renderSafeInputsMCPConfigWithOptions(yaml, safeInputs, r.options.IsLast, r.options.IncludeCopilotFields, workflowData)
+	renderMCPScriptsMCPConfigWithOptions(yaml, mcpScripts, r.options.IsLast, r.options.IncludeCopilotFields, workflowData)
 }
 
-// renderSafeInputsTOML generates Safe Inputs MCP configuration in TOML format
+// renderMCPScriptsTOML generates MCP Scripts configuration in TOML format
 // Uses HTTP transport exclusively
-func (r *MCPConfigRendererUnified) renderSafeInputsTOML(yaml *strings.Builder, safeInputs *SafeInputsConfig, workflowData *WorkflowData) {
+func (r *MCPConfigRendererUnified) renderMCPScriptsTOML(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, workflowData *WorkflowData) {
 	yaml.WriteString("          \n")
-	yaml.WriteString("          [mcp_servers." + constants.SafeInputsMCPServerID.String() + "]\n")
+	yaml.WriteString("          [mcp_servers." + constants.MCPScriptsMCPServerID.String() + "]\n")
 	yaml.WriteString("          type = \"http\"\n")
 
 	// Determine host based on whether agent is disabled
@@ -373,13 +386,13 @@ func (r *MCPConfigRendererUnified) renderSafeInputsTOML(yaml *strings.Builder, s
 	if workflowData != nil && workflowData.SandboxConfig != nil && workflowData.SandboxConfig.Agent != nil && workflowData.SandboxConfig.Agent.Disabled {
 		// When agent is disabled (no firewall), use localhost instead of host.docker.internal
 		host = "localhost"
-		mcpRendererLog.Print("Using localhost for safe-inputs (agent disabled)")
+		mcpRendererLog.Print("Using localhost for mcp-scripts (agent disabled)")
 	} else {
-		mcpRendererLog.Print("Using host.docker.internal for safe-inputs (agent enabled)")
+		mcpRendererLog.Print("Using host.docker.internal for mcp-scripts (agent enabled)")
 	}
 
-	yaml.WriteString("          url = \"http://" + host + ":$GH_AW_SAFE_INPUTS_PORT\"\n")
-	yaml.WriteString("          headers = { Authorization = \"$GH_AW_SAFE_INPUTS_API_KEY\" }\n")
+	yaml.WriteString("          url = \"http://" + host + ":$GH_AW_MCP_SCRIPTS_PORT\"\n")
+	yaml.WriteString("          headers = { Authorization = \"$GH_AW_MCP_SCRIPTS_API_KEY\" }\n")
 	// Note: env_vars is not supported for HTTP transport in MCP configuration
 	// Environment variables are passed via the workflow job's env: section instead
 }
@@ -622,7 +635,7 @@ type MCPToolRenderers struct {
 	RenderCacheMemory      func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
 	RenderAgenticWorkflows func(yaml *strings.Builder, isLast bool)
 	RenderSafeOutputs      func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
-	RenderSafeInputs       func(yaml *strings.Builder, safeInputs *SafeInputsConfig, isLast bool)
+	RenderMCPScripts       func(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, isLast bool)
 	RenderWebFetch         func(yaml *strings.Builder, isLast bool)
 	RenderCustomMCPConfig  RenderCustomMCPToolConfigHandler
 }
@@ -898,6 +911,40 @@ func renderGuardPoliciesJSON(yaml *strings.Builder, policies map[string]any, ind
 	fmt.Fprintf(yaml, "%s\"guard-policies\": %s\n", indent, string(jsonBytes))
 }
 
+// renderGuardPoliciesToml renders a "guard-policies" section in TOML format for a given server.
+// The policies map contains policy names (e.g., "write-sink") mapped to their configurations.
+func renderGuardPoliciesToml(yaml *strings.Builder, policies map[string]any, serverID string) {
+	if len(policies) == 0 {
+		return
+	}
+
+	yaml.WriteString("          \n")
+	yaml.WriteString("          [mcp_servers." + serverID + ".\"guard-policies\"]\n")
+
+	// Iterate over each policy (e.g., "write-sink")
+	for policyName, policyConfig := range policies {
+		yaml.WriteString("          \n")
+		yaml.WriteString("          [mcp_servers." + serverID + ".\"guard-policies\"." + policyName + "]\n")
+
+		// Extract policy fields (e.g., "accept")
+		if configMap, ok := policyConfig.(map[string]any); ok {
+			for fieldName, fieldValue := range configMap {
+				// Handle array values (e.g., accept = ["private:github/gh-aw*"])
+				if arrayValue, ok := fieldValue.([]string); ok {
+					yaml.WriteString("          " + fieldName + " = [")
+					for i, item := range arrayValue {
+						if i > 0 {
+							yaml.WriteString(", ")
+						}
+						yaml.WriteString("\"" + item + "\"")
+					}
+					yaml.WriteString("]\n")
+				}
+			}
+		}
+	}
+}
+
 // RenderJSONMCPConfig renders MCP configuration in JSON format with the common mcpServers structure.
 // This shared function extracts the duplicate pattern from Claude, Copilot, and Custom engines.
 //
@@ -957,9 +1004,9 @@ func RenderJSONMCPConfig(
 			options.Renderers.RenderAgenticWorkflows(&configBuilder, isLast)
 		case "safe-outputs":
 			options.Renderers.RenderSafeOutputs(&configBuilder, isLast, workflowData)
-		case "safe-inputs":
-			if options.Renderers.RenderSafeInputs != nil {
-				options.Renderers.RenderSafeInputs(&configBuilder, workflowData.SafeInputs, isLast)
+		case "mcp-scripts":
+			if options.Renderers.RenderMCPScripts != nil {
+				options.Renderers.RenderMCPScripts(&configBuilder, workflowData.MCPScripts, isLast)
 			}
 		case "web-fetch":
 			options.Renderers.RenderWebFetch(&configBuilder, isLast)

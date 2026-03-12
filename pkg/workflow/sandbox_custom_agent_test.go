@@ -150,7 +150,6 @@ sandbox:
 
 		compiler := NewCompiler(
 			WithVersion("test"),
-			WithStrictMode(false),
 		)
 		err = compiler.CompileWorkflow(testFile)
 		if err != nil {
@@ -184,7 +183,7 @@ sandbox:
 		}
 
 		// Verify installation step was skipped (no curl command for AWF)
-		if strings.Contains(lockStr, "Install awf binary") {
+		if strings.Contains(lockStr, "Install AWF binary") {
 			t.Error("Expected AWF installation step to be skipped when custom command is specified")
 		}
 	})
@@ -222,7 +221,6 @@ sandbox:
 
 		compiler := NewCompiler(
 			WithVersion("test"),
-			WithStrictMode(false),
 		)
 		err = compiler.CompileWorkflow(testFile)
 		if err != nil {
@@ -243,7 +241,7 @@ sandbox:
 		}
 
 		// Verify installation step is present
-		if !strings.Contains(lockStr, "Install awf binary") {
+		if !strings.Contains(lockStr, "Install AWF binary") {
 			t.Error("Expected AWF installation step with legacy type field")
 		}
 	})
@@ -283,7 +281,6 @@ sandbox:
 
 		compiler := NewCompiler(
 			WithVersion("test"),
-			WithStrictMode(false),
 		)
 		err = compiler.CompileWorkflow(testFile)
 		if err != nil {

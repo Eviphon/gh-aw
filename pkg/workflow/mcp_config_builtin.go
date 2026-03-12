@@ -69,7 +69,7 @@
 //   - mcp_renderer.go: Main renderer that calls these functions
 //   - mcp_setup_generator.go: Generates setup steps for these servers
 //   - safe_outputs.go: Safe-outputs configuration and validation
-//   - safe_inputs.go: Safe-inputs configuration (similar pattern)
+//   - mcp_scripts.go: MCP Scripts configuration (similar pattern)
 //
 // Example safe-outputs config:
 //
@@ -108,15 +108,8 @@ import (
 
 var mcpBuiltinLog = logger.New("workflow:mcp-config-builtin")
 
-// renderSafeOutputsMCPConfig generates the Safe Outputs MCP server configuration
-// This is a shared function used by both Claude and Custom engines
-func renderSafeOutputsMCPConfig(yaml *strings.Builder, isLast bool, workflowData *WorkflowData) {
-	mcpBuiltinLog.Print("Rendering Safe Outputs MCP configuration")
-	renderSafeOutputsMCPConfigWithOptions(yaml, isLast, false, workflowData)
-}
-
 // renderSafeOutputsMCPConfigWithOptions generates the Safe Outputs MCP server configuration with engine-specific options
-// Now uses HTTP transport instead of stdio, similar to safe-inputs
+// Now uses HTTP transport instead of stdio, similar to mcp-scripts
 // The server is started in a separate step before the agent job
 func renderSafeOutputsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, includeCopilotFields bool, workflowData *WorkflowData) {
 	mcpBuiltinLog.Printf("Rendering Safe Outputs MCP config with options: isLast=%v, includeCopilotFields=%v", isLast, includeCopilotFields)
@@ -149,10 +142,25 @@ func renderSafeOutputsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, i
 		// Claude/Custom format: direct shell variable reference
 		yaml.WriteString("                  \"Authorization\": \"$GH_AW_SAFE_OUTPUTS_API_KEY\"\n")
 	}
-	// Close headers - no trailing comma since this is the last field
-	// Note: env block is NOT included for HTTP servers because the old MCP Gateway schema
-	// doesn't allow env in httpServerConfig. The variables are resolved via URL templates.
-	yaml.WriteString("                }\n")
+	yaml.WriteString("                }")
+
+	// Check if GitHub tool has guard-policies configured
+	// If so, generate a linked write-sink guard-policy for safeoutputs
+	var guardPolicies map[string]any
+	if workflowData != nil && workflowData.Tools != nil {
+		if githubTool, hasGitHub := workflowData.Tools["github"]; hasGitHub {
+			guardPolicies = deriveSafeOutputsGuardPolicyFromGitHub(githubTool)
+		}
+	}
+
+	// Add guard-policies if configured
+	if len(guardPolicies) > 0 {
+		mcpBuiltinLog.Print("Adding guard-policies to safeoutputs (derived from GitHub guard-policy)")
+		yaml.WriteString(",\n")
+		renderGuardPoliciesJSON(yaml, guardPolicies, "                ")
+	} else {
+		yaml.WriteString("\n")
+	}
 
 	if isLast {
 		yaml.WriteString("              }\n")

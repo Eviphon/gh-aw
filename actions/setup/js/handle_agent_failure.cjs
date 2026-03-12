@@ -77,10 +77,14 @@ async function findPullRequestForCurrentBranch() {
 /**
  * Search for or create the parent issue for all agentic workflow failures
  * @param {number|null} previousParentNumber - Previous parent issue number if creating due to limit
+ * @param {string} [ownerOverride] - Repository owner override (from failure-issue-repo config)
+ * @param {string} [repoOverride] - Repository name override (from failure-issue-repo config)
  * @returns {Promise<{number: number, node_id: string}>} Parent issue number and node ID
  */
-async function ensureParentIssue(previousParentNumber = null) {
-  const { owner, repo } = context.repo;
+async function ensureParentIssue(previousParentNumber = null, ownerOverride, repoOverride) {
+  const { owner: contextOwner, repo: contextRepo } = context.repo;
+  const owner = ownerOverride || contextOwner;
+  const repo = repoOverride || contextRepo;
   const parentTitle = "[aw] Failed runs";
   const parentLabel = "agentic-workflows";
 
@@ -307,15 +311,18 @@ function buildForkContextHint() {
  * section with clearer remediation instructions.
  * @param {string} codePushFailureErrors - Newline-separated list of "type:error" entries
  * @param {{number: number, html_url: string, head_sha?: string, mergeable?: boolean | null, mergeable_state?: string, updated_at?: string} | null} pullRequest - PR info if available
+ * @param {string} [runUrl] - URL of the current workflow run, used to provide patch download instructions
  * @returns {string} Formatted context string, or empty string if no failures
  */
-function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null) {
+function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null, runUrl = "") {
   if (!codePushFailureErrors) {
     return "";
   }
 
-  // Split errors into protected-file protection refusals and other push failures
+  // Split errors into protected-file protection refusals, patch size errors, patch apply failures, and other push failures
   const manifestErrors = [];
+  const patchSizeErrors = [];
+  const patchApplyErrors = [];
   const otherErrors = [];
   const errorLines = codePushFailureErrors.split("\n").filter(line => line.trim());
   for (const errorLine of errorLines) {
@@ -325,6 +332,10 @@ function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null) 
       const error = errorLine.substring(colonIndex + 1);
       if (error.includes("manifest files") || error.includes("protected files")) {
         manifestErrors.push({ type, error });
+      } else if (error.includes("Patch size") && error.includes("exceeds")) {
+        patchSizeErrors.push({ type, error });
+      } else if (error.includes("Failed to apply patch")) {
+        patchApplyErrors.push({ type, error });
       } else {
         otherErrors.push({ type, error });
       }
@@ -359,6 +370,82 @@ function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null) 
     yamlSnippet += "```\n";
     context += "\nTo review and apply these changes manually, configure `protected-files: fallback-to-issue` — the agent will create a review issue with instructions instead of blocking:\n";
     context += yamlSnippet;
+  }
+
+  // Patch size exceeded section
+  if (patchSizeErrors.length > 0) {
+    context += "\n**📦 Patch Size Exceeded**: The code push was rejected because the generated patch is too large.\n";
+    if (pullRequest) {
+      context += `\n**Target Pull Request:** [#${pullRequest.number}](${pullRequest.html_url})\n`;
+    }
+    context += "\n**Errors:**\n";
+    for (const { type, error } of patchSizeErrors) {
+      context += `- \`${type}\`: ${error}\n`;
+    }
+    // Build a dynamic YAML snippet listing only the safe output types that had patch size errors
+    const typeToYamlKey = {
+      create_pull_request: "create-pull-request",
+      push_to_pull_request_branch: "push-to-pull-request-branch",
+    };
+    const affectedTypes = [...new Set(patchSizeErrors.map(e => e.type))];
+    let yamlSnippet = "```yaml\nsafe-outputs:\n";
+    for (const type of affectedTypes) {
+      const yamlKey = typeToYamlKey[type] || type.replace(/_/g, "-");
+      yamlSnippet += `  ${yamlKey}:\n    max-patch-size: 2048  # Example: double the default limit (in KB, default: 1024)\n`;
+    }
+    yamlSnippet += "```\n";
+    context += "\nTo allow larger patches, increase `max-patch-size` in your workflow's front matter (value in KB):\n";
+    context += yamlSnippet;
+  }
+
+  // Patch apply failure section — shown when the patch could not be applied (e.g. merge conflict)
+  if (patchApplyErrors.length > 0) {
+    context += "\n**🔀 Patch Apply Failed**: The patch could not be applied to the current state of the repository. " + "This is typically caused by a merge conflict between the agent's changes and recent commits on the target branch.\n";
+    if (pullRequest) {
+      context += `\n**Target Pull Request:** [#${pullRequest.number}](${pullRequest.html_url})\n`;
+    }
+    context += "\n**Failed Operations:**\n";
+    for (const { type, error } of patchApplyErrors) {
+      context += `- \`${type}\`: ${error}\n`;
+    }
+
+    // Extract run ID from runUrl for use in the download command
+    let runId = "";
+    if (runUrl) {
+      const runIdMatch = runUrl.match(/\/actions\/runs\/(\d+)/);
+      if (runIdMatch) {
+        runId = runIdMatch[1];
+      }
+    }
+
+    context += "\nTo manually apply the patch:\n\n";
+    if (runId) {
+      context += `\`\`\`sh
+# Download the patch artifact from the workflow run
+gh run download ${runId} -n agent-artifacts -D /tmp/agent-artifacts-${runId}
+
+# List available patches
+ls /tmp/agent-artifacts-${runId}/*.patch
+
+# Create a new branch (adjust as needed)
+git checkout -b aw/manual-apply
+
+# Apply the patch (--3way handles cross-repo patches)
+git am --3way /tmp/agent-artifacts-${runId}/YOUR_PATCH_FILE.patch
+
+# If there are conflicts, resolve them and continue (or abort):
+# git am --continue
+# git am --abort
+
+# Push and create a pull request
+git push origin aw/manual-apply
+gh pr create --head aw/manual-apply
+\`\`\`
+${runUrl ? `\nThe patch artifact is available at: [View run and download artifacts](${runUrl})\n` : ""}`;
+    } else {
+      context += "Download the patch artifact from the workflow run, then apply it with `git am --3way <patch-file>`.\n";
+    }
+    context += "\n";
   }
 
   // Generic code-push failure section
@@ -410,12 +497,41 @@ function buildCodePushFailureContext(codePushFailureErrors, pullRequest = null) 
       context += `- \`${type}\`: ${error}\n`;
     }
     context += "\n";
-  } else if (manifestErrors.length > 0) {
-    // Only manifest errors — ensure trailing newline
+  } else if (manifestErrors.length > 0 || patchSizeErrors.length > 0 || patchApplyErrors.length > 0) {
+    // Only manifest, patch size, or patch apply errors — ensure trailing newline
     context += "\n";
   }
 
   return context;
+}
+
+/**
+ * Build a context string for push_repo_memory job failures, with a dedicated section for patch size errors.
+ * @param {boolean} hasPushRepoMemoryFailure - Whether the push_repo_memory job failed
+ * @param {string[]} repoMemoryPatchSizeExceededIDs - Memory IDs that exceeded the patch size limit
+ * @param {string} runUrl - URL of the current workflow run
+ * @returns {string} Formatted context string, or empty string if no failure
+ */
+function buildPushRepoMemoryFailureContext(hasPushRepoMemoryFailure, repoMemoryPatchSizeExceededIDs, runUrl) {
+  if (!hasPushRepoMemoryFailure) {
+    return "";
+  }
+  if (repoMemoryPatchSizeExceededIDs.length > 0) {
+    let context = "\n**📦 Repo-Memory Patch Size Exceeded**: The repo-memory push failed because the memory data is too large.\n";
+    context += "\n**Affected memories:** " + repoMemoryPatchSizeExceededIDs.map(id => `\`${id}\``).join(", ") + "\n";
+    context += "\nTo allow larger memory snapshots, increase `max-patch-size` in your workflow's `repo-memory` front matter (value in bytes):\n";
+    context += "```yaml\nrepo-memory:\n";
+    for (const memoryID of repoMemoryPatchSizeExceededIDs) {
+      context += `  - id: ${memoryID}\n    max-patch-size: 51200  # Example: 5x the default limit (in bytes, default: 10240, max: 102400)\n`;
+    }
+    context += "```\n\n";
+    return context;
+  }
+  return (
+    "\n**⚠️ Repo-Memory Push Failed**: The push-repo-memory job failed to write memory back to the repository. This may indicate a permission issue, a configuration error, or a network problem. Check the [workflow run](" +
+    runUrl +
+    ") for details.\n\n"
+  );
 }
 
 /**
@@ -543,9 +659,11 @@ async function main() {
     const timeoutMinutes = process.env.GH_AW_TIMEOUT_MINUTES || "";
     const inferenceAccessError = process.env.GH_AW_INFERENCE_ACCESS_ERROR === "true";
     const pushRepoMemoryResult = process.env.GH_AW_PUSH_REPO_MEMORY_RESULT || "";
+    const reportFailureAsIssue = process.env.GH_AW_FAILURE_REPORT_AS_ISSUE !== "false"; // Default to true
 
     // Collect repo-memory validation errors from all memory configurations
     const repoMemoryValidationErrors = [];
+    const repoMemoryPatchSizeExceededIDs = [];
     for (const key in process.env) {
       if (key.startsWith("GH_AW_REPO_MEMORY_VALIDATION_FAILED_")) {
         const memoryID = key.replace("GH_AW_REPO_MEMORY_VALIDATION_FAILED_", "");
@@ -554,6 +672,12 @@ async function main() {
           const errorKey = `GH_AW_REPO_MEMORY_VALIDATION_ERROR_${memoryID}`;
           const errorMessage = process.env[errorKey] || "Unknown validation error";
           repoMemoryValidationErrors.push({ memoryID, errorMessage });
+        }
+      }
+      if (key.startsWith("GH_AW_REPO_MEMORY_PATCH_SIZE_EXCEEDED_")) {
+        const memoryID = key.replace("GH_AW_REPO_MEMORY_PATCH_SIZE_EXCEEDED_", "");
+        if (process.env[key] === "true") {
+          repoMemoryPatchSizeExceededIDs.push(memoryID);
         }
       }
     }
@@ -617,6 +741,12 @@ async function main() {
       return;
     }
 
+    // Check if failure issue reporting is disabled
+    if (!reportFailureAsIssue) {
+      core.info("Failure issue reporting is disabled (report-failure-as-issue: false), skipping failure issue creation");
+      return;
+    }
+
     // Check if the failure was due to PR checkout (e.g., PR was merged and branch deleted)
     // If checkout_pr_success is "false", skip creating an issue as this is expected behavior
     if (agentConclusion === "failure" && checkoutPRSuccess === "false") {
@@ -624,7 +754,18 @@ async function main() {
       return;
     }
 
-    const { owner, repo } = context.repo;
+    // Determine the target repository for failure issues
+    // If GH_AW_FAILURE_ISSUE_REPO is set, use that repo instead of the current repo
+    const failureIssueRepo = process.env.GH_AW_FAILURE_ISSUE_REPO || "";
+    let owner, repo;
+    if (failureIssueRepo && failureIssueRepo.includes("/")) {
+      const parts = failureIssueRepo.split("/");
+      owner = parts[0];
+      repo = parts[1];
+      core.info(`Using configured failure issue repo: ${owner}/${repo}`);
+    } else {
+      ({ owner, repo } = context.repo);
+    }
 
     // Try to find a pull request for the current branch
     const pullRequest = await findPullRequestForCurrentBranch();
@@ -636,7 +777,7 @@ async function main() {
     let parentIssue;
     if (groupReports) {
       try {
-        parentIssue = await ensureParentIssue();
+        parentIssue = await ensureParentIssue(null, owner, repo);
       } catch (error) {
         core.warning(`Could not create parent issue, proceeding without parent: ${getErrorMessage(error)}`);
         // Continue without parent issue
@@ -647,12 +788,7 @@ async function main() {
 
     // Sanitize workflow name for title
     const sanitizedWorkflowName = sanitizeContent(workflowName, { maxLength: 100 });
-    // Detect pre-agent failure: agent never produced output (artifact was not downloaded).
-    // When the artifact download succeeds, GH_AW_AGENT_OUTPUT is set; when it fails the
-    // env var is absent, indicating the agent did not reach output-production.
-    const isPreAgentFailure = agentConclusion === "failure" && !process.env.GH_AW_AGENT_OUTPUT;
-    const failureStage = isPreAgentFailure ? " (pre-agent)" : "";
-    const issueTitle = `[aw] ${sanitizedWorkflowName} failed${failureStage}`;
+    const issueTitle = `[aw] ${sanitizedWorkflowName} failed`;
 
     core.info(`Checking for existing issue with title: "${issueTitle}"`);
 
@@ -703,7 +839,7 @@ async function main() {
         const createDiscussionErrorsContext = hasCreateDiscussionErrors ? buildCreateDiscussionErrorsContext(createDiscussionErrors) : "";
 
         // Build code-push failure context
-        const codePushFailureContext = hasCodePushFailures ? buildCodePushFailureContext(codePushFailureErrors, pullRequest) : "";
+        const codePushFailureContext = hasCodePushFailures ? buildCodePushFailureContext(codePushFailureErrors, pullRequest, runUrl) : "";
 
         // Build repo-memory validation errors context
         let repoMemoryValidationContext = "";
@@ -720,11 +856,7 @@ async function main() {
         }
 
         // Build push_repo_memory job failure context
-        const pushRepoMemoryFailureContext = hasPushRepoMemoryFailure
-          ? "\n**⚠️ Repo-Memory Push Failed**: The push-repo-memory job failed to write memory back to the repository. This may indicate a permission issue, a configuration error, or a network problem. Check the [workflow run](" +
-            runUrl +
-            ") for details.\n\n"
-          : "";
+        const pushRepoMemoryFailureContext = buildPushRepoMemoryFailureContext(hasPushRepoMemoryFailure, repoMemoryPatchSizeExceededIDs, runUrl);
 
         // Build missing_data context
         const missingDataContext = buildMissingDataContext();
@@ -831,7 +963,7 @@ async function main() {
         const createDiscussionErrorsContext = hasCreateDiscussionErrors ? buildCreateDiscussionErrorsContext(createDiscussionErrors) : "";
 
         // Build code-push failure context
-        const codePushFailureContext = hasCodePushFailures ? buildCodePushFailureContext(codePushFailureErrors, pullRequest) : "";
+        const codePushFailureContext = hasCodePushFailures ? buildCodePushFailureContext(codePushFailureErrors, pullRequest, runUrl) : "";
 
         // Build repo-memory validation errors context
         let repoMemoryValidationContext = "";
@@ -848,11 +980,7 @@ async function main() {
         }
 
         // Build push_repo_memory job failure context
-        const pushRepoMemoryFailureContext = hasPushRepoMemoryFailure
-          ? "\n**⚠️ Repo-Memory Push Failed**: The push-repo-memory job failed to write memory back to the repository. This may indicate a permission issue, a configuration error, or a network problem. Check the [workflow run](" +
-            runUrl +
-            ") for details.\n\n"
-          : "";
+        const pushRepoMemoryFailureContext = buildPushRepoMemoryFailureContext(hasPushRepoMemoryFailure, repoMemoryPatchSizeExceededIDs, runUrl);
 
         // Build missing_data context
         const missingDataContext = buildMissingDataContext();
@@ -957,4 +1085,4 @@ async function main() {
   }
 }
 
-module.exports = { main, buildCodePushFailureContext };
+module.exports = { main, buildCodePushFailureContext, buildPushRepoMemoryFailureContext };

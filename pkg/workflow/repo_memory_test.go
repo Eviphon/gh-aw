@@ -245,63 +245,6 @@ func TestRepoMemoryStepsGeneration(t *testing.T) {
 	}
 }
 
-// TestRepoMemoryPushStepsGeneration tests that push steps are generated correctly
-func TestRepoMemoryPushStepsGeneration(t *testing.T) {
-	config := &RepoMemoryConfig{
-		Memories: []RepoMemoryEntry{
-			{
-				ID:           "default",
-				BranchName:   "memory/default",
-				MaxFileSize:  10240,
-				MaxFileCount: 100,
-			},
-		},
-	}
-
-	data := &WorkflowData{
-		RepoMemoryConfig: config,
-	}
-
-	var builder strings.Builder
-	generateRepoMemoryPushSteps(&builder, data)
-
-	output := builder.String()
-
-	// Check for push step
-	if !strings.Contains(output, "Push repo-memory changes (default)") {
-		t.Error("Expected push step for repo-memory")
-	}
-
-	// Check for if: always()
-	if !strings.Contains(output, "if: always()") {
-		t.Error("Expected always() condition")
-	}
-
-	// Check for git commit
-	if !strings.Contains(output, "git commit") {
-		t.Error("Expected git commit command")
-	}
-
-	// Check for git push
-	if !strings.Contains(output, "git push") {
-		t.Error("Expected git push command")
-	}
-
-	// Check for merge strategy
-	if !strings.Contains(output, "-X ours") {
-		t.Error("Expected ours merge strategy")
-	}
-
-	// Check for validation
-	if !strings.Contains(output, "Check file sizes") {
-		t.Error("Expected file size validation")
-	}
-
-	if !strings.Contains(output, "Check file count") {
-		t.Error("Expected file count validation")
-	}
-}
-
 // TestRepoMemoryPromptGeneration tests that prompt section is generated correctly
 func TestRepoMemoryPromptGeneration(t *testing.T) {
 	config := &RepoMemoryConfig{
@@ -1175,7 +1118,7 @@ func TestRepoMemoryWikiPromptSection(t *testing.T) {
 	assert.Contains(t, wikiNote, "Markdown", "Wiki note should mention Markdown syntax")
 }
 
-// TestRepoMemoryNonWikiPromptSection tests that non-wiki mode has empty wiki note
+// TestRepoMemoryNonWikiPromptSection tests that non-wiki mode uses empty string expression for wiki note
 func TestRepoMemoryNonWikiPromptSection(t *testing.T) {
 	config := &RepoMemoryConfig{
 		Memories: []RepoMemoryEntry{
@@ -1192,7 +1135,9 @@ func TestRepoMemoryNonWikiPromptSection(t *testing.T) {
 	require.NotNil(t, section.EnvVars, "Expected env vars")
 
 	wikiNote := section.EnvVars["GH_AW_WIKI_NOTE"]
-	assert.Empty(t, wikiNote, "Non-wiki mode should have empty GH_AW_WIKI_NOTE")
+	// Non-wiki mode should use a GitHub expression that evaluates to empty string.
+	// This ensures __GH_AW_WIKI_NOTE__ is always substituted via expression interpolation.
+	assert.Equal(t, ghaEmptyStringExpr, wikiNote, "Non-wiki mode should use empty string expression for GH_AW_WIKI_NOTE")
 }
 
 // TestRepoMemoryWikiPushAllowedRepos tests that wiki mode sets REPO_MEMORY_ALLOWED_REPOS

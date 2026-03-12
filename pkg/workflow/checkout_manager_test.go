@@ -498,35 +498,6 @@ func TestCheckoutCurrentFlag(t *testing.T) {
 	})
 }
 
-// TestGetCurrentCheckoutRepository verifies the standalone helper function.
-func TestGetCurrentCheckoutRepository(t *testing.T) {
-	t.Run("nil slice returns empty string", func(t *testing.T) {
-		assert.Empty(t, getCurrentCheckoutRepository(nil), "nil slice should return empty string")
-	})
-
-	t.Run("no current flag returns empty string", func(t *testing.T) {
-		configs := []*CheckoutConfig{
-			{Repository: "owner/repo"},
-		}
-		assert.Empty(t, getCurrentCheckoutRepository(configs), "no current flag should return empty string")
-	})
-
-	t.Run("current: true returns repository", func(t *testing.T) {
-		configs := []*CheckoutConfig{
-			{Repository: "owner/other"},
-			{Repository: "owner/target", Current: true},
-		}
-		assert.Equal(t, "owner/target", getCurrentCheckoutRepository(configs), "should return current checkout repository")
-	})
-
-	t.Run("current: true with no repository returns empty string", func(t *testing.T) {
-		configs := []*CheckoutConfig{
-			{Current: true},
-		}
-		assert.Empty(t, getCurrentCheckoutRepository(configs), "current without repository should return empty string")
-	})
-}
-
 // TestBuildCheckoutsPromptContent verifies the prompt content generation for the checkout list.
 func TestBuildCheckoutsPromptContent(t *testing.T) {
 	t.Run("nil slice returns empty string", func(t *testing.T) {
@@ -937,5 +908,36 @@ func TestAdditionalCheckoutWithAppAuth(t *testing.T) {
 		combined := strings.Join(lines, "")
 		assert.Contains(t, combined, "steps.checkout-app-token-1.outputs.token", "additional checkout should reference app token at index 1")
 		assert.Contains(t, combined, "other/repo", "should reference the additional repo")
+	})
+}
+
+// TestCrossRepoTargetRepo verifies the SetCrossRepoTargetRepo/GetCrossRepoTargetRepo lifecycle.
+func TestCrossRepoTargetRepo(t *testing.T) {
+	t.Run("default is empty string (same-repo)", func(t *testing.T) {
+		cm := NewCheckoutManager(nil)
+		assert.Empty(t, cm.GetCrossRepoTargetRepo(), "new checkout manager should have no cross-repo target")
+	})
+
+	t.Run("activation job expression is stored and retrievable", func(t *testing.T) {
+		cm := NewCheckoutManager(nil)
+		cm.SetCrossRepoTargetRepo("${{ steps.resolve-host-repo.outputs.target_repo }}")
+		assert.Equal(t, "${{ steps.resolve-host-repo.outputs.target_repo }}", cm.GetCrossRepoTargetRepo())
+	})
+
+	t.Run("downstream job expression (needs.activation.outputs) is stored and retrievable", func(t *testing.T) {
+		cm := NewCheckoutManager(nil)
+		cm.SetCrossRepoTargetRepo("${{ needs.activation.outputs.target_repo }}")
+		assert.Equal(t, "${{ needs.activation.outputs.target_repo }}", cm.GetCrossRepoTargetRepo())
+	})
+
+	t.Run("GenerateGitHubFolderCheckoutStep uses stored value", func(t *testing.T) {
+		cm := NewCheckoutManager(nil)
+		cm.SetCrossRepoTargetRepo("${{ needs.activation.outputs.target_repo }}")
+
+		lines := cm.GenerateGitHubFolderCheckoutStep(cm.GetCrossRepoTargetRepo(), GetActionPin)
+		combined := strings.Join(lines, "")
+
+		assert.Contains(t, combined, "repository: ${{ needs.activation.outputs.target_repo }}",
+			"checkout step should use the cross-repo target")
 	})
 }

@@ -34,6 +34,18 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 	// Activation job doesn't need project support (no safe outputs processed here)
 	steps = append(steps, c.generateSetupStep(setupActionRef, SetupActionDestination, false)...)
 
+	// When a workflow_call trigger is present, resolve the platform (host) repository before
+	// generating aw_info so that target_repo can be included in aw_info.json and used by
+	// the checkout step. This is necessary for event-driven relays (e.g. on: issue_comment)
+	// where github.event_name is not 'workflow_call', making the previous expression
+	// (github.event_name == 'workflow_call' && github.action_repository || github.repository)
+	// unreliable. GITHUB_WORKFLOW_REF always reflects the executing workflow's repo regardless
+	// of how it was triggered.
+	if hasWorkflowCallTrigger(data.On) && !data.InlinedImports {
+		compilerActivationJobLog.Print("Adding resolve-host-repo step for workflow_call trigger")
+		steps = append(steps, c.generateResolveHostRepoStep())
+	}
+
 	// Generate agentic run info immediately after setup so aw_info.json is ready as early as possible.
 	// This ensures it is available for prompt generation and can be uploaded together with prompt.txt.
 	engine, err := c.getAgenticEngine(data.AI)
@@ -47,6 +59,13 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 	// Expose the model output from the activation job so downstream jobs can reference it
 	outputs["model"] = "${{ steps.generate_aw_info.outputs.model }}"
 
+	// Expose the resolved platform (host) repository so agent and safe_outputs jobs can use
+	// needs.activation.outputs.target_repo for any checkout that must target the platform repo
+	// rather than github.repository (the caller's repo in cross-repo workflow_call scenarios).
+	if hasWorkflowCallTrigger(data.On) && !data.InlinedImports {
+		outputs["target_repo"] = "${{ steps.resolve-host-repo.outputs.target_repo }}"
+	}
+
 	// Add secret validation step before context variable validation.
 	// This validates that the required engine secrets are available before any other checks.
 	secretValidationStep := engine.GetSecretValidationStep(data)
@@ -58,6 +77,22 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 		compilerActivationJobLog.Printf("Added validate-secret step to activation job")
 	} else {
 		compilerActivationJobLog.Printf("Skipped validate-secret step (engine does not require secret validation)")
+	}
+
+	// Add cross-repo setup guidance when workflow_call is a trigger.
+	// This step only runs when secret validation fails in a cross-repo context,
+	// providing actionable guidance to the caller team about configuring secrets.
+	// Use steps.resolve-host-repo.outputs.target_repo != github.repository instead of
+	// github.event_name == 'workflow_call': the latter never fires for event-driven relays
+	// (issue_comment/push → workflow_call) where the event_name is the originating event.
+	if hasWorkflowCallTrigger(data.On) {
+		compilerActivationJobLog.Print("Adding cross-repo setup guidance step for workflow_call trigger")
+		steps = append(steps, "      - name: Cross-repo setup guidance\n")
+		steps = append(steps, "        if: failure() && steps.resolve-host-repo.outputs.target_repo != github.repository\n")
+		steps = append(steps, "        run: |\n")
+		steps = append(steps, "          echo \"::error::COPILOT_GITHUB_TOKEN must be configured in the CALLER repository's secrets.\"\n")
+		steps = append(steps, "          echo \"::error::For cross-repo workflow_call, secrets must be set in the repository that triggers the workflow.\"\n")
+		steps = append(steps, "          echo \"::error::See: https://github.github.com/gh-aw/patterns/central-repo-ops/#cross-repo-setup\"\n")
 	}
 
 	// Checkout .github and .agents folders for accessing workflow configurations and runtime imports
@@ -313,6 +348,28 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 	compilerActivationJobLog.Print("Generating prompt in activation job")
 	c.generatePromptInActivationJob(&steps, data, preActivationJobCreated, customJobsBeforeActivation)
 
+	// Generate APM pack step if dependencies are specified.
+	// The pack step runs after prompt generation and uploads as a separate "apm" artifact.
+	if data.APMDependencies != nil && len(data.APMDependencies.Packages) > 0 {
+		compilerActivationJobLog.Printf("Adding APM pack step: %d packages", len(data.APMDependencies.Packages))
+		apmTarget := engine.GetAPMTarget()
+		apmPackStep := GenerateAPMPackStep(data.APMDependencies, apmTarget, data)
+		for _, line := range apmPackStep {
+			steps = append(steps, line+"\n")
+		}
+		// Upload the packed APM bundle as a separate artifact for the agent job to download.
+		// The path comes from the apm_pack step output `bundle-path`, which microsoft/apm-action
+		// sets to the location of the packed .tar.gz archive.
+		compilerActivationJobLog.Print("Adding APM bundle artifact upload step")
+		steps = append(steps, "      - name: Upload APM bundle artifact\n")
+		steps = append(steps, "        if: success()\n")
+		steps = append(steps, fmt.Sprintf("        uses: %s\n", GetActionPin("actions/upload-artifact")))
+		steps = append(steps, "        with:\n")
+		steps = append(steps, "          name: apm\n")
+		steps = append(steps, "          path: ${{ steps.apm_pack.outputs.bundle-path }}\n")
+		steps = append(steps, "          retention-days: 1\n")
+	}
+
 	// Upload aw_info.json and prompt.txt as the activation artifact for the agent job to download
 	compilerActivationJobLog.Print("Adding activation artifact upload step")
 	steps = append(steps, "      - name: Upload activation artifact\n")
@@ -399,6 +456,33 @@ func (c *Compiler) generatePromptInActivationJob(steps *[]string, data *Workflow
 	compilerActivationJobLog.Print("Prompt generation steps added to activation job")
 }
 
+// generateResolveHostRepoStep generates a step that resolves the platform (host) repository
+// for the activation job checkout by inspecting GITHUB_WORKFLOW_REF at runtime.
+//
+// This step replaces the previous compile-time expression
+//
+//	github.event_name == 'workflow_call' && github.action_repository || github.repository
+//
+// which only worked when the outermost trigger was workflow_call. For event-driven relays
+// (e.g. on: issue_comment, on: push) the event_name is the native event, so the old
+// expression always fell back to github.repository (the caller's repo), causing the
+// activation job to check out the wrong repository.
+//
+// GITHUB_WORKFLOW_REF always contains the path of the currently executing workflow file
+// (owner/repo/.github/workflows/file.yml@ref), regardless of the triggering event.
+// Comparing its owner/repo prefix with GITHUB_REPOSITORY reliably detects cross-repo
+// invocations for all relay patterns.
+func (c *Compiler) generateResolveHostRepoStep() string {
+	var step strings.Builder
+	step.WriteString("      - name: Resolve host repo for activation checkout\n")
+	step.WriteString("        id: resolve-host-repo\n")
+	step.WriteString(fmt.Sprintf("        uses: %s\n", GetActionPin("actions/github-script")))
+	step.WriteString("        with:\n")
+	step.WriteString("          script: |\n")
+	step.WriteString(generateGitHubScriptWithRequire("resolve_host_repo.cjs"))
+	return step.String()
+}
+
 // generateCheckoutGitHubFolderForActivation generates the checkout step for .github and .agents folders
 // specifically for the activation job. Unlike generateCheckoutGitHubFolder, this method doesn't skip
 // the checkout when the agent job will have a full repository checkout, because the activation job
@@ -422,19 +506,26 @@ func (c *Compiler) generateCheckoutGitHubFolderForActivation(data *WorkflowData)
 	// but the activation job will always have it for GitHub API access and runtime imports.
 	// The agent job uses only the user-specified permissions (no automatic contents:read augmentation).
 
+	// For workflow_call triggers, checkout the callee (platform) repository using the target_repo
+	// output from the resolve-host-repo step. That step parses GITHUB_WORKFLOW_REF at runtime to
+	// determine the platform repo, correctly handling event-driven relays where event_name is not
+	// 'workflow_call' (e.g. on: issue_comment, on: push).
+	//
+	// Skip when inlined-imports is enabled: content is embedded at compile time and no
+	// runtime-import macros are used, so the callee's .md files are not needed at runtime.
+	cm := NewCheckoutManager(nil)
+	if data != nil && hasWorkflowCallTrigger(data.On) && !data.InlinedImports {
+		compilerActivationJobLog.Print("Adding cross-repo-aware .github checkout for workflow_call trigger")
+		cm.SetCrossRepoTargetRepo("${{ steps.resolve-host-repo.outputs.target_repo }}")
+		return cm.GenerateGitHubFolderCheckoutStep(
+			cm.GetCrossRepoTargetRepo(),
+			GetActionPin,
+		)
+	}
+
 	// For activation job, always add sparse checkout of .github and .agents folders
 	// This is needed for runtime imports during prompt generation
 	// sparse-checkout-cone-mode: true ensures subdirectories under .github/ are recursively included
 	compilerActivationJobLog.Print("Adding .github and .agents sparse checkout in activation job")
-	return []string{
-		"      - name: Checkout .github and .agents folders\n",
-		fmt.Sprintf("        uses: %s\n", GetActionPin("actions/checkout")),
-		"        with:\n",
-		"          sparse-checkout: |\n",
-		"            .github\n",
-		"            .agents\n",
-		"          sparse-checkout-cone-mode: true\n",
-		"          fetch-depth: 1\n",
-		"          persist-credentials: false\n",
-	}
+	return cm.GenerateGitHubFolderCheckoutStep("", GetActionPin)
 }

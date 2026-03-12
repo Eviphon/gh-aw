@@ -148,6 +148,11 @@ type WorkflowExecutor interface {
 	// before secret redaction runs. Engines that copy session or firewall state files should
 	// override this; the default implementation returns an empty slice.
 	GetFirewallLogsCollectionStep(workflowData *WorkflowData) []GitHubActionStep
+
+	// GetAPMTarget returns the APM target value to use when packing dependencies with
+	// microsoft/apm-action. Supported values are "copilot", "claude", and "all".
+	// The default implementation returns "all" (packs all primitive types).
+	GetAPMTarget() string
 }
 
 // MCPConfigProvider handles MCP (Model Context Protocol) configuration
@@ -212,6 +217,15 @@ type AgentFileProvider interface {
 	GetAgentManifestPathPrefixes() []string
 }
 
+// ConfigRenderer is an optional hook that runtimes may implement to emit generated
+// config files or metadata before execution steps run.
+type ConfigRenderer interface {
+	// RenderConfig optionally generates runtime config files or metadata.
+	// Returns a slice of GitHub Actions steps that write config to disk.
+	// Implementations that don't need config files should return nil, nil.
+	RenderConfig(target *ResolvedEngineTarget) ([]map[string]any, error)
+}
+
 // CodingAgentEngine is a composite interface that combines all focused interfaces
 // This maintains backward compatibility with existing code while allowing more flexibility
 // Implementations can choose to implement only the interfaces they need by embedding BaseEngine
@@ -223,6 +237,7 @@ type CodingAgentEngine interface {
 	LogParser
 	SecurityProvider
 	ModelEnvVarProvider
+	ConfigRenderer
 }
 
 // BaseEngine provides common functionality for agentic engines
@@ -327,6 +342,12 @@ func (e *BaseEngine) GetFirewallLogsCollectionStep(workflowData *WorkflowData) [
 	return []GitHubActionStep{}
 }
 
+// GetAPMTarget returns "all" by default (packs all primitive types).
+// CopilotEngine overrides this to return "copilot"; ClaudeEngine overrides to return "claude".
+func (e *BaseEngine) GetAPMTarget() string {
+	return "all"
+}
+
 // ParseLogMetrics provides a default no-op implementation for log parsing
 // Engines can override this to provide detailed log parsing and metrics extraction
 func (e *BaseEngine) ParseLogMetrics(logContent string, verbose bool) LogMetrics {
@@ -358,10 +379,10 @@ func (e *BaseEngine) GetAgentManifestPathPrefixes() []string {
 	return nil
 }
 
-// convertStepToYAML converts a step map to YAML string - uses proper YAML serialization
-// This is a shared implementation inherited by all engines that embed BaseEngine
-func (e *BaseEngine) convertStepToYAML(stepMap map[string]any) (string, error) {
-	return ConvertStepToYAML(stepMap)
+// RenderConfig returns nil by default — engines that need to write config files before
+// execution (e.g. provider/model config files) should override this method.
+func (e *BaseEngine) RenderConfig(_ *ResolvedEngineTarget) ([]map[string]any, error) {
+	return nil, nil
 }
 
 // EngineRegistry manages available agentic engines
@@ -451,34 +472,6 @@ func (r *EngineRegistry) GetEngineByPrefix(prefix string) (CodingAgentEngine, er
 		}
 	}
 	return nil, fmt.Errorf("no engine found matching prefix: %s", prefix)
-}
-
-// GenerateSecretValidationStep creates a GitHub Actions step that validates required secrets are available
-// secretName: the name of the secret to validate (e.g., "ANTHROPIC_API_KEY")
-// engineName: the display name of the engine (e.g., "Claude Code")
-// docsURL: URL to the documentation page for setting up the secret
-func GenerateSecretValidationStep(secretName, engineName, docsURL string) GitHubActionStep {
-	stepLines := []string{
-		fmt.Sprintf("      - name: Validate %s secret", secretName),
-		"        run: |",
-		fmt.Sprintf("          if [ -z \"$%s\" ]; then", secretName),
-		fmt.Sprintf("            echo \"Error: %s secret is not set\"", secretName),
-		fmt.Sprintf("            echo \"The %s engine requires the %s secret to be configured.\"", engineName, secretName),
-		"            echo \"Please configure this secret in your repository settings.\"",
-		fmt.Sprintf("            echo \"Documentation: %s\"", docsURL),
-		"            exit 1",
-		"          fi",
-		"          ",
-		"          # Log success in collapsible section",
-		"          echo \"<details>\"",
-		"          echo \"<summary>Agent Environment Validation</summary>\"",
-		"          echo \"\"",
-		fmt.Sprintf("          echo \"✅ %s: Configured\"", secretName),
-		"          echo \"</details>\"",
-		"        env:",
-		fmt.Sprintf("          %s: ${{ secrets.%s }}", secretName, secretName),
-	}
-	return GitHubActionStep(stepLines)
 }
 
 // GenerateMultiSecretValidationStep creates a GitHub Actions step that validates at least one of multiple secrets is available

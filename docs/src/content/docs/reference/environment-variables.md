@@ -22,7 +22,7 @@ GitHub Agentic Workflows supports environment variables in 13 distinct contexts:
 | **Sandbox Agent** | `sandbox.agent.env` | Sandbox runtime | Sandbox configuration |
 | **Sandbox MCP** | `sandbox.mcp.env` | Model Context Protocol (MCP) gateway | MCP debugging |
 | **MCP Tools** | `tools.<name>.env` | MCP server process | MCP server secrets |
-| **Safe Inputs** | `safe-inputs.<name>.env` | Safe-input execution | Tool-specific tokens |
+| **MCP Scripts** | `mcp-scripts.<name>.env` | MCP script execution | Tool-specific tokens |
 | **Safe Outputs Global** | `safe-outputs.env` | All safe-output jobs | Shared safe-output config |
 | **Safe Outputs Job** | `safe-outputs.jobs.<name>.env` | Specific safe-output job | Job-specific config |
 | **GitHub Actions Step** | `githubActionsStep.env` | Pre-defined steps | Step configuration |
@@ -98,6 +98,29 @@ echo "Found 3 issues across 12 files." >> "$GITHUB_STEP_SUMMARY"
 
 The output appears in the **Summary** tab of the GitHub Actions workflow run.
 
+## System-Injected Runtime Variables
+
+GitHub Agentic Workflows automatically injects the following environment variables into every agentic engine execution step (both the main agent run and the threat detection run). These variables are read-only from the agent's perspective and are useful for writing workflows or agents that need to detect their execution context.
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `GITHUB_AW` | `"true"` | Present in every gh-aw engine execution step. Agents can check for this variable to confirm they are running inside a GitHub Agentic Workflow. |
+| `GH_AW_PHASE` | `"agent"` or `"detection"` | Identifies which execution phase is active. `"agent"` for the main run; `"detection"` for the threat-detection safety check run that precedes the main run. |
+| `GH_AW_VERSION` | e.g. `"0.40.1"` | The gh-aw compiler version that generated the workflow. Useful for conditional logic that depends on a minimum feature version. |
+
+These variables appear alongside other `GH_AW_*` context variables in the compiled workflow:
+
+```yaml
+env:
+  GITHUB_AW: "true"
+  GH_AW_PHASE: agent        # or "detection"
+  GH_AW_VERSION: "0.40.1"
+  GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+```
+
+> [!NOTE]
+> These variables are injected by the compiler and cannot be overridden by user-defined `env:` blocks in the workflow frontmatter.
+
 ## Precedence Rules
 
 Environment variables follow a **most-specific-wins** model, consistent with GitHub Actions. Variables at more specific scopes completely override variables with the same name at less specific scopes.
@@ -116,7 +139,7 @@ Environment variables follow a **most-specific-wins** model, consistent with Git
 
 ### Context-Specific Scopes
 
-These scopes are independent and operate in different contexts: `engine.env`, `container.env`, `services.<id>.env`, `sandbox.agent.env`, `sandbox.mcp.env`, `tools.<tool>.env`, `safe-inputs.<tool>.env`.
+These scopes are independent and operate in different contexts: `engine.env`, `container.env`, `services.<id>.env`, `sandbox.agent.env`, `sandbox.mcp.env`, `tools.<tool>.env`, `mcp-scripts.<tool>.env`.
 
 ### Override Example
 
@@ -145,5 +168,5 @@ jobs:
 - [Safe Outputs](/gh-aw/reference/safe-outputs/) - Safe output environment configuration
 - [Sandbox](/gh-aw/reference/sandbox/) - Sandbox environment variables
 - [Tools](/gh-aw/reference/tools/) - MCP tool configuration
-- [Safe Inputs](/gh-aw/reference/safe-inputs/) - Safe input tool configuration
+- [MCP Scripts](/gh-aw/reference/mcp-scripts/) - MCP script tool configuration
 - [GitHub Actions Environment Variables](https://docs.github.com/en/actions/learn-github-actions/variables) - GitHub Actions documentation

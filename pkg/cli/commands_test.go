@@ -311,6 +311,21 @@ func TestNormalizeWorkflowID(t *testing.T) {
 			input:    "test-workflow.md",
 			expected: "test-workflow",
 		},
+		{
+			name:     "workflow ID with .lock.yml extension",
+			input:    "my-workflow.lock.yml",
+			expected: "my-workflow",
+		},
+		{
+			name:     "full path with .lock.yml extension",
+			input:    ".github/workflows/my-workflow.lock.yml",
+			expected: "my-workflow",
+		},
+		{
+			name:     "absolute path with .lock.yml extension",
+			input:    "/home/user/project/.github/workflows/my-workflow.lock.yml",
+			expected: "my-workflow",
+		},
 	}
 
 	for _, tt := range tests {
@@ -468,7 +483,7 @@ func TestNewWorkflow(t *testing.T) {
 			}
 
 			// Run the function
-			err := NewWorkflow(test.workflowName, false, test.force)
+			err := NewWorkflow(test.workflowName, false, test.force, "")
 
 			// Check error expectation
 			if test.expectedError && err == nil {

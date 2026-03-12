@@ -150,7 +150,7 @@ This workflow tests the create_pull_request job generation.
 		t.Error("Expected 'Download patch artifact' step in create_pull_request job")
 	}
 
-	if !strings.Contains(lockContentStr, "actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3") {
+	if !strings.Contains(lockContentStr, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") {
 		t.Error("Expected download-artifact action to be used in create_pull_request job")
 	}
 
@@ -563,9 +563,9 @@ This test verifies that the aw-*.patch artifact is downloaded in the safe_output
 		t.Errorf("Expected 'Download patch artifact' step in safe_outputs job when create-pull-request is enabled")
 	}
 
-	// Verify that patch is downloaded from unified agent-artifacts
-	if !strings.Contains(lockContentStr, "name: agent-artifacts") {
-		t.Errorf("Expected patch artifact to be downloaded from 'agent-artifacts'")
+	// Verify that patch is downloaded from unified agent artifact
+	if !strings.Contains(lockContentStr, "name: agent\n") {
+		t.Errorf("Expected patch artifact to be downloaded from unified 'agent' artifact")
 	}
 
 	if !strings.Contains(lockContentStr, "path: /tmp/gh-aw/") {

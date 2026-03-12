@@ -554,6 +554,12 @@ func (c *Compiler) buildCustomJobs(data *WorkflowData, activationJobCreated bool
 				case string:
 					job.Concurrency = "concurrency: " + v
 				case map[string]any:
+					// Default cancel-in-progress to false for non-agent jobs if not explicitly set.
+					// This prevents accidental cancellation of queued runs when multiple agents
+					// are running the same workflow concurrently.
+					if _, hasCancelInProgress := v["cancel-in-progress"]; !hasCancelInProgress {
+						v["cancel-in-progress"] = false
+					}
 					yamlBytes, err := yaml.Marshal(v)
 					if err != nil {
 						return fmt.Errorf("failed to convert concurrency to YAML for job '%s': %w", jobName, err)
@@ -655,9 +661,14 @@ func (c *Compiler) buildCustomJobs(data *WorkflowData, activationJobCreated bool
 
 					// Extract secrets for reusable workflow
 					if secrets, hasSecrets := configMap["secrets"]; hasSecrets {
-						if secretsMap, ok := secrets.(map[string]any); ok {
+						switch sv := secrets.(type) {
+						case string:
+							if sv == "inherit" {
+								job.SecretsInherit = true
+							}
+						case map[string]any:
 							job.Secrets = make(map[string]string)
-							for key, val := range secretsMap {
+							for key, val := range sv {
 								if valStr, ok := val.(string); ok {
 									// Validate that the secret value is a proper GitHub Actions expression
 									// Note: We don't pass the key to validateSecretsExpression to prevent

@@ -279,8 +279,8 @@ func (c *Compiler) getEngineBaseEnvVarKeys(engineID string) map[string]bool {
 	}
 	// Use a minimal WorkflowData so we get only the engine's unconditional secrets.
 	// GetRequiredSecretNames only adds extra secrets when non-nil MCP tools (ParsedTools.GitHub,
-	// ParsedTools.Playwright, etc.) are set, or when SafeInputs is populated. By passing empty
-	// Tools/ParsedTools and no SafeInputs we get just the base engine secrets (e.g.
+	// ParsedTools.Playwright, etc.) are set, or when MCPScripts is populated. By passing empty
+	// Tools/ParsedTools and no MCPScripts we get just the base engine secrets (e.g.
 	// COPILOT_GITHUB_TOKEN, ANTHROPIC_API_KEY) without any optional/conditional ones.
 	minimalData := &WorkflowData{
 		Tools:       map[string]any{},
@@ -290,6 +290,17 @@ func (c *Compiler) getEngineBaseEnvVarKeys(engineID string) map[string]bool {
 	for _, name := range engine.GetRequiredSecretNames(minimalData) {
 		keys[name] = true
 	}
+
+	// Also include secrets declared in the AuthDefinition for inline engine definitions.
+	// This allows workflows to pass auth secrets through engine.env without triggering the
+	// "secret in env" strict-mode check.
+	if def := c.engineCatalog.Get(engineID); def != nil && def.Provider.Auth != nil {
+		for _, name := range def.Provider.Auth.RequiredSecretNames() {
+			strictModeValidationLog.Printf("Adding auth-definition secret key to allowlist: %s", name)
+			keys[name] = true
+		}
+	}
+
 	return keys
 }
 

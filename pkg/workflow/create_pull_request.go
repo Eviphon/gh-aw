@@ -33,6 +33,7 @@ type CreatePullRequestsConfig struct {
 	FallbackAsIssue                *bool    `yaml:"fallback-as-issue,omitempty"`                   // When true (default), creates an issue if PR creation fails. When false, no fallback occurs and issues: write permission is not requested.
 	GithubTokenForExtraEmptyCommit string   `yaml:"github-token-for-extra-empty-commit,omitempty"` // Token used to push an empty commit to trigger CI events. Use a PAT or "app" for GitHub App auth.
 	ManifestFilesPolicy            *string  `yaml:"protected-files,omitempty"`                     // Controls protected-file protection: "blocked" (default) hard-blocks, "allowed" permits all changes, "fallback-to-issue" pushes the branch but creates a review issue.
+	AllowedFiles                   []string `yaml:"allowed-files,omitempty"`                       // Strict allowlist of glob patterns for files eligible for create. Checked independently of protected-files; both checks must pass.
 }
 
 // parsePullRequestsConfig handles only create-pull-request (singular) configuration
@@ -60,18 +61,12 @@ func (c *Compiler) parsePullRequestsConfig(outputMap map[string]any) *CreatePull
 		}
 	}
 
-	// Pre-process the expires field if it's a string (convert to int before unmarshaling)
-	if configData != nil {
-		if expires, exists := configData["expires"]; exists {
-			if _, ok := expires.(string); ok {
-				// Parse the string format and replace with int
-				expiresInt := parseExpiresFromConfig(configData)
-				if expiresInt > 0 {
-					configData["expires"] = expiresInt
-					createPRLog.Printf("Converted expires from relative time format to hours: %d", expiresInt)
-				}
-			}
-		}
+	// Pre-process the expires field (convert to hours before unmarshaling)
+	// Use preprocessExpiresField to handle all types: integers (days), strings (time specs), and boolean false
+	// This is consistent with how parseIssuesConfig and parseDiscussionsConfig handle expires
+	expiresDisabled := preprocessExpiresField(configData, createPRLog)
+	if expiresDisabled {
+		createPRLog.Print("Pull request expiration disabled")
 	}
 
 	// Pre-process templatable bool fields: convert literal booleans to strings so that

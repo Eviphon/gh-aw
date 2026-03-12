@@ -483,7 +483,8 @@ var handlerRegistry = map[string]handlerBuilder{
 			AddIfNotEmpty("base_branch", c.BaseBranch).
 			AddStringPtr("protected_files_policy", c.ManifestFilesPolicy).
 			AddStringSlice("protected_files", getAllManifestFiles()).
-			AddStringSlice("protected_path_prefixes", getProtectedPathPrefixes())
+			AddStringSlice("protected_path_prefixes", getProtectedPathPrefixes()).
+			AddStringSlice("allowed_files", c.AllowedFiles)
 		return builder.Build()
 	},
 	"push_to_pull_request_branch": func(cfg *SafeOutputsConfig) map[string]any {
@@ -510,6 +511,7 @@ var handlerRegistry = map[string]handlerBuilder{
 			AddStringPtr("protected_files_policy", c.ManifestFilesPolicy).
 			AddStringSlice("protected_files", getAllManifestFiles()).
 			AddStringSlice("protected_path_prefixes", getProtectedPathPrefixes()).
+			AddStringSlice("allowed_files", c.AllowedFiles).
 			Build()
 	},
 	"update_pull_request": func(cfg *SafeOutputsConfig) map[string]any {
@@ -565,7 +567,8 @@ var handlerRegistry = map[string]handlerBuilder{
 		c := cfg.DispatchWorkflow
 		builder := newHandlerConfigBuilder().
 			AddTemplatableInt("max", c.Max).
-			AddStringSlice("workflows", c.Workflows)
+			AddStringSlice("workflows", c.Workflows).
+			AddIfNotEmpty("target-repo", c.TargetRepoSlug)
 
 		// Add workflow_files map if it has entries
 		if len(c.WorkflowFiles) > 0 {
@@ -726,9 +729,17 @@ func (c *Compiler) addHandlerManagerConfigEnvVar(steps *[]string, data *Workflow
 	fullManifestFiles := getAllManifestFiles(extraManifestFiles...)
 	fullPathPrefixes := getProtectedPathPrefixes(extraPathPrefixes...)
 
+	// For workflow_call relay workflows, inject the resolved platform repo into the
+	// dispatch_workflow handler config so dispatch targets the host repo, not the caller's.
+	safeOutputs := data.SafeOutputs
+	if hasWorkflowCallTrigger(data.On) && safeOutputs.DispatchWorkflow != nil && safeOutputs.DispatchWorkflow.TargetRepoSlug == "" {
+		safeOutputs = safeOutputsWithDispatchTargetRepo(safeOutputs, "${{ needs.activation.outputs.target_repo }}")
+		compilerSafeOutputsConfigLog.Print("Injecting target_repo into dispatch_workflow config for workflow_call relay")
+	}
+
 	// Build configuration for each handler using the registry
 	for handlerName, builder := range handlerRegistry {
-		handlerConfig := builder(data.SafeOutputs)
+		handlerConfig := builder(safeOutputs)
 		// Include handler if:
 		// 1. It returns a non-nil config (explicitly enabled, even if empty)
 		// 2. For auto-enabled handlers, include even with empty config
@@ -758,6 +769,17 @@ func (c *Compiler) addHandlerManagerConfigEnvVar(steps *[]string, data *Workflow
 	} else {
 		compilerSafeOutputsConfigLog.Print("No handlers configured, skipping config env var")
 	}
+}
+
+// safeOutputsWithDispatchTargetRepo returns a shallow copy of cfg with the dispatch_workflow
+// TargetRepoSlug overridden to targetRepo. Only DispatchWorkflow is deep-copied; all other
+// pointer fields remain shared. This avoids mutating the original config.
+func safeOutputsWithDispatchTargetRepo(cfg *SafeOutputsConfig, targetRepo string) *SafeOutputsConfig {
+	dispatchCopy := *cfg.DispatchWorkflow
+	dispatchCopy.TargetRepoSlug = targetRepo
+	configCopy := *cfg
+	configCopy.DispatchWorkflow = &dispatchCopy
+	return &configCopy
 }
 
 // getEngineAgentFileInfo returns the engine-specific manifest filenames and path prefixes

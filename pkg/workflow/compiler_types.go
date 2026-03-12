@@ -42,19 +42,9 @@ func WithNoEmit(noEmit bool) CompilerOption {
 	return func(c *Compiler) { c.noEmit = noEmit }
 }
 
-// WithStrictMode configures whether to enable strict validation mode
-func WithStrictMode(strict bool) CompilerOption {
-	return func(c *Compiler) { c.strictMode = strict }
-}
-
 // WithFailFast configures whether to stop at first validation error
 func WithFailFast(failFast bool) CompilerOption {
 	return func(c *Compiler) { c.failFast = failFast }
-}
-
-// WithForceRefreshActionPins configures whether to force refresh of action pins
-func WithForceRefreshActionPins(force bool) CompilerOption {
-	return func(c *Compiler) { c.forceRefreshActionPins = force }
 }
 
 // WithWorkflowIdentifier sets the identifier for the current workflow being compiled
@@ -98,6 +88,7 @@ type Compiler struct {
 	actionTag               string              // Override action SHA or tag for actions/setup (when set, overrides actionMode to release)
 	jobManager              *JobManager         // Manages jobs and dependencies
 	engineRegistry          *EngineRegistry     // Registry of available agentic engines
+	engineCatalog           *EngineCatalog      // Catalog of engine definitions backed by the registry
 	fileTracker             FileTracker         // Optional file tracker for tracking created files
 	warningCount            int                 // Number of warnings encountered during compilation
 	stepOrderTracker        *StepOrderTracker   // Tracks step ordering for validation
@@ -136,6 +127,7 @@ func NewCompiler(opts ...CompilerOption) *Compiler {
 		actionMode:        DetectActionMode(version), // Auto-detect action mode based on version
 		jobManager:        NewJobManager(),
 		engineRegistry:    GetGlobalEngineRegistry(),
+		engineCatalog:     NewEngineCatalog(GetGlobalEngineRegistry()),
 		stepOrderTracker:  NewStepOrderTracker(),
 		artifactManager:   NewArtifactManager(),
 		actionPinWarnings: make(map[string]bool), // Initialize warning cache
@@ -351,87 +343,90 @@ type SkipIfNoMatchConfig struct {
 
 // WorkflowData holds all the data needed to generate a GitHub Actions workflow
 type WorkflowData struct {
-	Name                  string
-	WorkflowID            string         // workflow identifier derived from markdown filename (basename without extension)
-	TrialMode             bool           // whether the workflow is running in trial mode
-	TrialLogicalRepo      string         // target repository slug for trial mode (owner/repo)
-	FrontmatterName       string         // name field from frontmatter (for code scanning alert driver default)
-	FrontmatterYAML       string         // raw frontmatter YAML content (rendered as comment in lock file for reference)
-	Description           string         // optional description rendered as comment in lock file
-	Source                string         // optional source field (owner/repo@ref/path) rendered as comment in lock file
-	TrackerID             string         // optional tracker identifier for created assets (min 8 chars, alphanumeric + hyphens/underscores)
-	ImportedFiles         []string       // list of files imported via imports field (rendered as comment in lock file)
-	ImportedMarkdown      string         // Only imports WITH inputs (for compile-time substitution)
-	ImportPaths           []string       // Import file paths for runtime-import macro generation (imports without inputs)
-	MainWorkflowMarkdown  string         // main workflow markdown without imports (for runtime-import)
-	IncludedFiles         []string       // list of files included via @include directives (rendered as comment in lock file)
-	ImportInputs          map[string]any // input values from imports with inputs (for github.aw.inputs.* substitution)
-	On                    string
-	Permissions           string
-	Network               string // top-level network permissions configuration
-	Concurrency           string // workflow-level concurrency configuration
-	RunName               string
-	Env                   string
-	If                    string
-	TimeoutMinutes        string
-	CustomSteps           string
-	PostSteps             string // steps to run after AI execution
-	RunsOn                string
-	Environment           string // environment setting for the main job
-	Container             string // container setting for the main job
-	Services              string // services setting for the main job
-	Tools                 map[string]any
-	ParsedTools           *Tools // Structured tools configuration (NEW: parsed from Tools map)
-	MarkdownContent       string
-	AI                    string        // "claude" or "codex" (for backwards compatibility)
-	EngineConfig          *EngineConfig // Extended engine configuration
-	AgentFile             string        // Path to custom agent file (from imports)
-	AgentImportSpec       string        // Original import specification for agent file (e.g., "owner/repo/path@ref")
-	RepositoryImports     []string      // Repository-only imports (format: "owner/repo@ref") for .github folder merging
-	StopTime              string
-	SkipIfMatch           *SkipIfMatchConfig   // skip-if-match configuration with query and max threshold
-	SkipIfNoMatch         *SkipIfNoMatchConfig // skip-if-no-match configuration with query and min threshold
-	SkipRoles             []string             // roles to skip workflow for (e.g., [admin, maintainer, write])
-	SkipBots              []string             // users to skip workflow for (e.g., [user1, user2])
-	ManualApproval        string               // environment name for manual approval from on: section
-	Command               []string             // for /command trigger support - multiple command names
-	CommandEvents         []string             // events where command should be active (nil = all events)
-	CommandOtherEvents    map[string]any       // for merging command with other events
-	AIReaction            string               // AI reaction type like "eyes", "heart", etc.
-	StatusComment         *bool                // whether to post status comments (default: true when ai-reaction is set, false otherwise)
-	ActivationGitHubToken string               // custom github token from on.github-token for reactions/comments
-	ActivationGitHubApp   *GitHubAppConfig     // github app config from on.github-app for minting activation tokens
-	LockForAgent          bool                 // whether to lock the issue during agent workflow execution
-	Jobs                  map[string]any       // custom job configurations with dependencies
-	Cache                 string               // cache configuration
-	NeedsTextOutput       bool                 // whether the workflow uses ${{ needs.task.outputs.text }}
-	NetworkPermissions    *NetworkPermissions  // parsed network permissions
-	SandboxConfig         *SandboxConfig       // parsed sandbox configuration (AWF or SRT)
-	SafeOutputs           *SafeOutputsConfig   // output configuration for automatic output routes
-	SafeInputs            *SafeInputsConfig    // safe-inputs configuration for custom MCP tools
-	Roles                 []string             // permission levels required to trigger workflow
-	Bots                  []string             // allow list of bot identifiers that can trigger workflow
-	RateLimit             *RateLimitConfig     // rate limiting configuration for workflow triggers
-	CacheMemoryConfig     *CacheMemoryConfig   // parsed cache-memory configuration
-	RepoMemoryConfig      *RepoMemoryConfig    // parsed repo-memory configuration
-	Runtimes              map[string]any       // runtime version overrides from frontmatter
-	PluginInfo            *PluginInfo          // Consolidated plugin information (plugins, custom token, MCP configs)
-	APMDependencies       *APMDependenciesInfo // APM (Agent Package Manager) dependency packages to install
-	ToolsTimeout          int                  // timeout in seconds for tool/MCP operations (0 = use engine default)
-	ToolsStartupTimeout   int                  // timeout in seconds for MCP server startup (0 = use engine default)
-	Features              map[string]any       // feature flags and configuration options from frontmatter (supports bool and string values)
-	ActionCache           *ActionCache         // cache for action pin resolutions
-	ActionResolver        *ActionResolver      // resolver for action pins
-	StrictMode            bool                 // strict mode for action pinning
-	SecretMasking         *SecretMaskingConfig // secret masking configuration
-	ParsedFrontmatter     *FrontmatterConfig   // cached parsed frontmatter configuration (for performance optimization)
-	RawFrontmatter        map[string]any       // raw parsed frontmatter map (for passing to hash functions without re-parsing)
-	ActionPinWarnings     map[string]bool      // cache of already-warned action pin failures (key: "repo@version")
-	ActionMode            ActionMode           // action mode for workflow compilation (dev, release, script)
-	HasExplicitGitHubTool bool                 // true if tools.github was explicitly configured in frontmatter
-	InlinedImports        bool                 // if true, inline all imports at compile time (from inlined-imports frontmatter field)
-	CheckoutConfigs       []*CheckoutConfig    // user-configured checkout settings from frontmatter
-	HasDispatchItemNumber bool                 // true when workflow_dispatch has item_number input (generated by label trigger shorthand)
+	Name                        string
+	WorkflowID                  string         // workflow identifier derived from markdown filename (basename without extension)
+	TrialMode                   bool           // whether the workflow is running in trial mode
+	TrialLogicalRepo            string         // target repository slug for trial mode (owner/repo)
+	FrontmatterName             string         // name field from frontmatter (for code scanning alert driver default)
+	FrontmatterYAML             string         // raw frontmatter YAML content (rendered as comment in lock file for reference)
+	Description                 string         // optional description rendered as comment in lock file
+	Source                      string         // optional source field (owner/repo@ref/path) rendered as comment in lock file
+	TrackerID                   string         // optional tracker identifier for created assets (min 8 chars, alphanumeric + hyphens/underscores)
+	ImportedFiles               []string       // list of files imported via imports field (rendered as comment in lock file)
+	ImportedMarkdown            string         // Only imports WITH inputs (for compile-time substitution)
+	ImportPaths                 []string       // Import file paths for runtime-import macro generation (imports without inputs)
+	MainWorkflowMarkdown        string         // main workflow markdown without imports (for runtime-import)
+	IncludedFiles               []string       // list of files included via @include directives (rendered as comment in lock file)
+	ImportInputs                map[string]any // input values from imports with inputs (for github.aw.inputs.* substitution)
+	On                          string
+	Permissions                 string
+	Network                     string // top-level network permissions configuration
+	Concurrency                 string // workflow-level concurrency configuration
+	RunName                     string
+	Env                         string
+	If                          string
+	TimeoutMinutes              string
+	CustomSteps                 string
+	PostSteps                   string // steps to run after AI execution
+	RunsOn                      string
+	Environment                 string // environment setting for the main job
+	Container                   string // container setting for the main job
+	Services                    string // services setting for the main job
+	Tools                       map[string]any
+	ParsedTools                 *Tools // Structured tools configuration (NEW: parsed from Tools map)
+	MarkdownContent             string
+	AI                          string        // "claude" or "codex" (for backwards compatibility)
+	EngineConfig                *EngineConfig // Extended engine configuration
+	AgentFile                   string        // Path to custom agent file (from imports)
+	AgentImportSpec             string        // Original import specification for agent file (e.g., "owner/repo/path@ref")
+	RepositoryImports           []string      // Repository-only imports (format: "owner/repo@ref") for .github folder merging
+	StopTime                    string
+	SkipIfMatch                 *SkipIfMatchConfig   // skip-if-match configuration with query and max threshold
+	SkipIfNoMatch               *SkipIfNoMatchConfig // skip-if-no-match configuration with query and min threshold
+	SkipRoles                   []string             // roles to skip workflow for (e.g., [admin, maintainer, write])
+	SkipBots                    []string             // users to skip workflow for (e.g., [user1, user2])
+	ManualApproval              string               // environment name for manual approval from on: section
+	Command                     []string             // for /command trigger support - multiple command names
+	CommandEvents               []string             // events where command should be active (nil = all events)
+	CommandOtherEvents          map[string]any       // for merging command with other events
+	AIReaction                  string               // AI reaction type like "eyes", "heart", etc.
+	StatusComment               *bool                // whether to post status comments (default: true when ai-reaction is set, false otherwise)
+	ActivationGitHubToken       string               // custom github token from on.github-token for reactions/comments
+	ActivationGitHubApp         *GitHubAppConfig     // github app config from on.github-app for minting activation tokens
+	LockForAgent                bool                 // whether to lock the issue during agent workflow execution
+	Jobs                        map[string]any       // custom job configurations with dependencies
+	Cache                       string               // cache configuration
+	NeedsTextOutput             bool                 // whether the workflow uses ${{ needs.task.outputs.text }}
+	NetworkPermissions          *NetworkPermissions  // parsed network permissions
+	SandboxConfig               *SandboxConfig       // parsed sandbox configuration (AWF or SRT)
+	SafeOutputs                 *SafeOutputsConfig   // output configuration for automatic output routes
+	MCPScripts                  *MCPScriptsConfig    // mcp-scripts configuration for custom MCP tools
+	Roles                       []string             // permission levels required to trigger workflow
+	Bots                        []string             // allow list of bot identifiers that can trigger workflow
+	RateLimit                   *RateLimitConfig     // rate limiting configuration for workflow triggers
+	CacheMemoryConfig           *CacheMemoryConfig   // parsed cache-memory configuration
+	RepoMemoryConfig            *RepoMemoryConfig    // parsed repo-memory configuration
+	Runtimes                    map[string]any       // runtime version overrides from frontmatter
+	PluginInfo                  *PluginInfo          // Consolidated plugin information (plugins, custom token, MCP configs)
+	APMDependencies             *APMDependenciesInfo // APM (Agent Package Manager) dependency packages to install
+	ToolsTimeout                int                  // timeout in seconds for tool/MCP operations (0 = use engine default)
+	ToolsStartupTimeout         int                  // timeout in seconds for MCP server startup (0 = use engine default)
+	Features                    map[string]any       // feature flags and configuration options from frontmatter (supports bool and string values)
+	ActionCache                 *ActionCache         // cache for action pin resolutions
+	ActionResolver              *ActionResolver      // resolver for action pins
+	StrictMode                  bool                 // strict mode for action pinning
+	SecretMasking               *SecretMaskingConfig // secret masking configuration
+	ParsedFrontmatter           *FrontmatterConfig   // cached parsed frontmatter configuration (for performance optimization)
+	RawFrontmatter              map[string]any       // raw parsed frontmatter map (for passing to hash functions without re-parsing)
+	ActionPinWarnings           map[string]bool      // cache of already-warned action pin failures (key: "repo@version")
+	ActionMode                  ActionMode           // action mode for workflow compilation (dev, release, script)
+	HasExplicitGitHubTool       bool                 // true if tools.github was explicitly configured in frontmatter
+	InlinedImports              bool                 // if true, inline all imports at compile time (from inlined-imports frontmatter field)
+	CheckoutConfigs             []*CheckoutConfig    // user-configured checkout settings from frontmatter
+	HasDispatchItemNumber       bool                 // true when workflow_dispatch has item_number input (generated by label trigger shorthand)
+	ConcurrencyJobDiscriminator string               // optional discriminator expression appended to job-level concurrency groups (from concurrency.job-discriminator)
+	IsDetectionRun              bool                 // true when this WorkflowData is used for inline threat detection (not the main agent run)
+	EngineConfigSteps           []map[string]any     // steps returned by engine.RenderConfig — prepended before execution steps
 }
 
 // BaseSafeOutputConfig holds common configuration fields for all safe output types
@@ -495,10 +490,13 @@ type SafeOutputsConfig struct {
 	Mentions                        *MentionsConfig                        `yaml:"mentions,omitempty"`                  // Configuration for @mention filtering in safe outputs
 	Footer                          *bool                                  `yaml:"footer,omitempty"`                    // Global footer control - when false, omits visible footer from all safe outputs (XML markers still included)
 	GroupReports                    bool                                   `yaml:"group-reports,omitempty"`             // If true, create parent "Failed runs" issue for agent failures (default: false)
+	ReportFailureAsIssue            *bool                                  `yaml:"report-failure-as-issue,omitempty"`   // If false, disables creating failure tracking issues when workflows fail (default: true)
+	FailureIssueRepo                string                                 `yaml:"failure-issue-repo,omitempty"`        // Repository to create failure issues in (format: "owner/repo"), defaults to current repo
 	MaxBotMentions                  *string                                `yaml:"max-bot-mentions,omitempty"`          // Maximum bot trigger references (e.g. 'fixes #123') allowed before filtering. Default: 10. Supports integer or GitHub Actions expression.
 	Steps                           []any                                  `yaml:"steps,omitempty"`                     // User-provided steps injected after setup/checkout and before safe-output code
 	IDToken                         *string                                `yaml:"id-token,omitempty"`                  // Override id-token permission: "write" to force-add, "none" to disable auto-detection
 	ConcurrencyGroup                string                                 `yaml:"concurrency-group,omitempty"`         // Concurrency group for the safe-outputs job (cancel-in-progress is always false)
+	Environment                     string                                 `yaml:"environment,omitempty"`               // Override the GitHub deployment environment for the safe-outputs job (defaults to the top-level environment: field)
 	AutoInjectedCreateIssue         bool                                   `yaml:"-"`                                   // Internal: true when create-issues was automatically injected by the compiler (not user-configured)
 }
 

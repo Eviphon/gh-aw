@@ -67,11 +67,18 @@ A service that implements the Model Context Protocol to provide specific capabil
 
 Capabilities that an AI agent can use during workflow execution. Tools are configured in the frontmatter and include GitHub operations ([`github:`](/gh-aw/reference/github-tools/)), file editing (`edit:`), web access (`web-fetch:`, `web-search:`), shell commands (`bash:`), browser automation ([`playwright:`](/gh-aw/reference/playwright/)), and custom MCP servers.
 
+### Guard Policy
+
+An experimental access control configuration for the GitHub MCP server that restricts which repositories and content integrity levels the agent can read. Configured via `tools.github.repos` (repository scope: `"all"`, `"public"`, or a list of patterns) and `tools.github.min-integrity` (minimum required integrity level). Both fields are required when either is specified. Integrity levels by trust: `merged` (content reachable from the main branch) > `approved` (owners, members, collaborators) > `unapproved` (contributors) > `none` (first-time users). See [GitHub Tools Reference](/gh-aw/reference/github-tools/#guard-policies).
+
+> [!NOTE]
+> Guard policy fields are experimental and may change in future releases. Using either field emits a compilation warning.
+
 ## Security and Outputs
 
-### Safe Inputs
+### MCP Scripts
 
-Custom MCP tools defined inline in workflow frontmatter using JavaScript or shell scripts. Enables lightweight tool creation without external dependencies while maintaining controlled secret access. Tools are generated at runtime and mounted as an MCP server with typed input parameters, default values, and environment variables. Configured via `safe-inputs:` section.
+Custom MCP tools defined inline in workflow frontmatter using JavaScript or shell scripts. Enables lightweight tool creation without external dependencies while maintaining controlled secret access. Tools are generated at runtime and mounted as an MCP server with typed input parameters, default values, and environment variables. Configured via `mcp-scripts:` section.
 
 ### SARIF
 
@@ -95,7 +102,7 @@ An optional field on safe output tool calls indicating the confidentiality level
 
 ### Staged Mode
 
-A preview mode where workflows simulate actions without making changes. The AI generates output showing what would happen, but no GitHub API write operations are performed. Use for testing before production runs.
+A preview mode where workflows simulate actions without making changes. The AI generates output showing what would happen, but no GitHub API write operations are performed. Use for testing before production runs. See [Staged Mode](/gh-aw/reference/staged-mode/) for details.
 
 ### Integrity
 
@@ -120,6 +127,28 @@ Access controls defining workflow operations. Workflows follow least privilege, 
 ### Safe Output Messages
 
 Customizable messages workflows can display during execution. Configured in `safe-outputs.messages` with types `run-started`, `run-success`, `run-failure`, and `footer`. Supports GitHub context variables like `{workflow_name}` and `{run_url}`.
+
+### Failure Issue Reporting (`report-failure-as-issue:`)
+
+A `safe-outputs` option controlling whether workflow run failures are automatically reported as GitHub issues. Defaults to `true` when safe outputs are configured. Set to `false` to suppress failure issue creation for workflows where failures are expected or handled externally:
+
+```yaml
+safe-outputs:
+  report-failure-as-issue: false
+```
+
+See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/).
+
+### Failure Issue Repository (`failure-issue-repo:`)
+
+A `safe-outputs` option that redirects failure tracking issues to a different repository. Useful when the workflow's repository has issues disabled:
+
+```yaml
+safe-outputs:
+  failure-issue-repo: github/docs-engineering
+```
+
+See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/).
 
 ### Upload Assets
 
@@ -157,6 +186,14 @@ A workflow-scoped identifier (format: `aw_` followed by 3–8 alphanumeric chara
 
 A safe output capability (`update-issue:`) for modifying existing issues without creating new ones. Each updatable field (`status`, `title`, `body`) must be explicitly enabled. Body updates accept an `operation` field: `append` (default), `prepend`, `replace`, or `replace-island` (updates a specific section delimited by HTML comments). Supports cross-repository issue updates. See [Safe Outputs Reference](/gh-aw/reference/safe-outputs/#issue-updates-update-issue).
 
+### Protected Files
+
+A security mechanism on `create-pull-request` and `push-to-pull-request-branch` safe outputs that prevents AI agents from modifying sensitive repository files. By default, protects dependency manifests (e.g., `package.json`, `go.mod`), GitHub Actions workflow files, and lock files. Configured via `protected-files:` with three policies: `blocked` (default — fails with error), `allowed` (no restriction), or `fallback-to-issue` (creates a review issue for human inspection instead of applying changes). See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#protected-files).
+
+### Allowed Files
+
+An exclusive allowlist for `create-pull-request` and `push-to-pull-request-branch` safe outputs. When `allowed-files:` is set to a list of glob patterns, **only** files matching those patterns may be modified — every other file (including normal source files) is refused. This is a restriction, not an exception: listing `.github/workflows/*` does not additionally allow normal source files; it blocks them. Runs independently from [Protected Files](#protected-files): both checks must pass. To modify a protected file, it must both match `allowed-files` and have `protected-files: allowed`. See [Safe Outputs (Pull Requests)](/gh-aw/reference/safe-outputs-pull-requests/#restricting-changes-to-specific-files-with-allowed-files).
+
 ## Workflow Components
 
 ### Activation Token (`on.github-token:`, `on.github-app:`)
@@ -170,6 +207,30 @@ A time-based trigger format. Use short syntax like `daily` or `weekly on monday`
 ### Engine
 
 The AI system that powers the agentic workflow - essentially "which AI to use" to execute workflow instructions. GitHub Agentic Workflows supports multiple engines, with GitHub Copilot as the default.
+
+### Inline Engine Definition
+
+An engine configuration format that specifies a runtime adapter and optional provider settings directly in workflow frontmatter, without requiring a named catalog entry. Uses a `runtime` object (with `id` and optional `version`) to identify the adapter and an optional `provider` object for model selection, authentication, and request shaping. Useful for connecting to self-hosted or third-party AI backends.
+
+```aw wrap
+engine:
+  runtime:
+    id: codex
+  provider:
+    id: azure-openai
+    model: gpt-4o
+    auth:
+      strategy: oauth-client-credentials
+      token-url: https://auth.example.com/oauth/token
+      client-id: AZURE_CLIENT_ID
+      client-secret: AZURE_CLIENT_SECRET
+    request:
+      path-template: /openai/deployments/{model}/chat/completions
+      query:
+        api-version: "2024-10-01-preview"
+```
+
+See [Engines Reference](/gh-aw/reference/engines/).
 
 ### Fuzzy Scheduling
 
@@ -201,7 +262,9 @@ Events that cause a workflow to run, defined in the `on:` section of frontmatter
 
 ### Trigger File
 
-A plain GitHub Actions workflow (`.yml`) that separates trigger definitions from agentic workflow logic. Calls a compiled orchestrator's `workflow_call` entry point in response to any GitHub event (issues, pushes, labels, manual dispatch). Decouples trigger changes from the compilation cycle — updating when an orchestrator runs requires editing only the trigger file, not recompiling the agentic workflow. See [CentralRepoOps](/gh-aw/patterns/central-repo-ops/).
+A plain GitHub Actions workflow (`.yml`) that separates trigger definitions from agentic workflow logic. Calls a compiled orchestrator's `workflow_call` entry point in response to any GitHub event (issues, pushes, labels, manual dispatch). Decouples trigger changes from the compilation cycle — updating when an orchestrator runs requires editing only the trigger file, not recompiling the agentic workflow.
+
+Trigger files can live in the **same repository** as the orchestrator or in a **different repository** (cross-repo `workflow_call`). Cross-repo usage requires the callee repository to be public, internal, or to have explicitly granted Actions access. When using `secrets: inherit`, the caller's secrets are passed through — including `COPILOT_GITHUB_TOKEN`, which must be configured in the caller's repository. See [CentralRepoOps](/gh-aw/patterns/central-repo-ops/).
 
 ### Weekday Schedules
 
@@ -301,6 +364,18 @@ A category of features for automatically expiring workflow resources to reduce r
 
 Configuration section in frontmatter defining environment variables for the workflow. Variables can reference GitHub context values, workflow inputs, or static values. Accessible via `${{ env.VARIABLE_NAME }}` syntax.
 
+### `GITHUB_AW`
+
+A system-injected environment variable set to `"true"` in every gh-aw engine execution step (both the agent run and the threat-detection run). Agents can check this variable to confirm they are running inside a GitHub Agentic Workflow. Cannot be overridden by user-defined `env:` blocks. See [Environment Variables Reference](/gh-aw/reference/environment-variables/).
+
+### `GH_AW_PHASE`
+
+A system-injected environment variable identifying the active execution phase. Set to `"agent"` during the main agent run and `"detection"` during the threat-detection safety check run that precedes it. Cannot be overridden by user-defined `env:` blocks. See [Environment Variables Reference](/gh-aw/reference/environment-variables/).
+
+### `GH_AW_VERSION`
+
+A system-injected environment variable containing the gh-aw compiler version that generated the workflow (e.g. `"0.40.1"`). Useful for writing conditional logic that depends on a minimum feature version. Cannot be overridden by user-defined `env:` blocks. See [Environment Variables Reference](/gh-aw/reference/environment-variables/).
+
 ### Repo Memory
 
 Persistent file storage via Git branches with unlimited retention. Unlike cache-memory (7-day retention), repo-memory stores files permanently in dedicated Git branches with automatic branch cloning, file access, commits, pushes, and merge conflict resolution. Setting `wiki: true` switches the backing to the GitHub Wiki's git endpoint (`{repo}.wiki.git`), and the agent receives guidance to follow GitHub Wiki Markdown conventions (e.g. `[[Page Name]]` links). See [Repo Memory](/gh-aw/reference/repo-memory/).
@@ -399,7 +474,7 @@ For detailed documentation on specific topics, see:
 
 - [Frontmatter Reference](/gh-aw/reference/frontmatter/)
 - [Tools Reference](/gh-aw/reference/tools/)
-- [Safe Inputs Reference](/gh-aw/reference/safe-inputs/)
+- [MCP Scripts Reference](/gh-aw/reference/mcp-scripts/)
 - [Safe Outputs Reference](/gh-aw/reference/safe-outputs/)
 - [Using MCPs Guide](/gh-aw/guides/mcps/)
 - [Security Guide](/gh-aw/introduction/architecture/)

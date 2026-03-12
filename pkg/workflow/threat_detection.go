@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
@@ -356,10 +357,11 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 		Tools: map[string]any{
 			"bash": []any{"cat", "head", "tail", "wc", "grep", "ls", "jq"},
 		},
-		SafeOutputs:  nil,
-		EngineConfig: detectionEngineConfig,
-		AI:           engineSetting,
-		Features:     data.Features,
+		SafeOutputs:    nil,
+		EngineConfig:   detectionEngineConfig,
+		AI:             engineSetting,
+		Features:       data.Features,
+		IsDetectionRun: true, // Mark as detection run for phase tagging
 		NetworkPermissions: &NetworkPermissions{
 			Allowed: []string{}, // deny-all: no network access
 		},
@@ -460,7 +462,7 @@ func (c *Compiler) buildUploadDetectionLogStep() []string {
 		fmt.Sprintf("        if: %s\n", detectionStepCondition),
 		fmt.Sprintf("        uses: %s\n", GetActionPin("actions/upload-artifact")),
 		"        with:\n",
-		"          name: threat-detection.log\n",
+		"          name: " + constants.DetectionArtifactName + "\n",
 		"          path: /tmp/gh-aw/threat-detection/detection.log\n",
 		"          if-no-files-found: ignore\n",
 	}

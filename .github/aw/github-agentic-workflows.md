@@ -284,6 +284,11 @@ The YAML frontmatter supports these fields:
     - `ref:` - Branch, tag, or SHA to check out (defaults to triggering ref)
     - `path:` - Relative path within `GITHUB_WORKSPACE` (defaults to workspace root)
     - `fetch-depth:` - Number of commits to fetch; `0` = full history, `1` = shallow (default)
+    - `fetch:` - Additional Git refs to fetch after checkout (array of patterns)
+      - `"*"` - fetch all remote branches
+      - `"refs/pulls/open/*"` - all open pull-request refs
+      - Branch names, glob patterns (e.g., `"feature/*"`)
+      - Example: `fetch: ["*"]`, `fetch: ["refs/pulls/open/*"]`
     - `sparse-checkout:` - Newline-separated glob patterns for sparse checkout
     - `submodules:` - Submodule handling: `"recursive"`, `"true"`, or `"false"`
     - `lfs:` - Download Git LFS objects (boolean, default: `false`)
@@ -788,6 +793,22 @@ The YAML frontmatter supports these fields:
         github-token-for-extra-empty-commit: ${{ secrets.MY_CI_PAT }}  # Optional: PAT or "app" to trigger CI on pushed commits
     ```
     Not supported for cross-repository operations. To trigger CI on pushed commits, use `github-token-for-extra-empty-commit` or set the magic secret `GH_AW_CI_TRIGGER_TOKEN`.
+
+    **Compile-time warnings for `target: "*"`**: When `target: "*"` is set, the compiler emits warnings if:
+    1. The checkout configuration does not include a wildcard fetch pattern — add `fetch: ["*"]` with `fetch-depth: 0` so the agent can access all PR branches at runtime
+    2. No constraints are provided — add `title-prefix` or `labels` to restrict which PRs can receive pushes
+
+    Example with all recommended settings:
+    ```yaml
+    checkout:
+      fetch: ["*"]
+      fetch-depth: 0
+    safe-outputs:
+      push-to-pull-request-branch:
+        target: "*"
+        title-prefix: "[bot] "   # restrict to PRs with this title prefix
+        labels: [automated]      # restrict to PRs carrying all these labels
+    ```
   - `update-discussion:` - Update discussion title, body, or labels
     ```yaml
     safe-outputs:
@@ -1071,6 +1092,9 @@ The YAML frontmatter supports these fields:
     - Patches exceeding this size are rejected to prevent accidental large changes
   - `group-reports:` - Group workflow failure reports as sub-issues (boolean, default: `false`)
     - When `true`, creates a parent `[aw] Failed runs` issue that tracks all workflow failures as sub-issues; useful for larger repositories
+  - `report-failure-as-issue:` - Control whether workflow failures are reported as GitHub issues (boolean, default: `true`)
+    - When `false`, suppresses automatic failure issue creation for this workflow
+    - Use to silence noisy failure reports for workflows where failures are expected or handled externally
   - `id-token:` - Override the id-token permission for the safe-outputs job (string: `"write"` or `"none"`)
     - `"write"`: force-enable `id-token: write` permission (required for OIDC authentication with cloud providers)
     - `"none"`: suppress automatic detection and prevent adding `id-token: write` even when vault/OIDC actions are detected in steps
@@ -1078,6 +1102,9 @@ The YAML frontmatter supports these fields:
   - `concurrency-group:` - Concurrency group for the safe-outputs job (string)
     - When set, the safe-outputs job uses this concurrency group with `cancel-in-progress: false`
     - Supports GitHub Actions expressions, e.g., `"safe-outputs-${{ github.repository }}"`
+  - `environment:` - Override the GitHub deployment environment for the safe-outputs job (string)
+    - Defaults to the top-level `environment:` field when not specified
+    - Use when the main job and safe-outputs job need different deployment environments for protection rules
   - `github-app:` - GitHub App credentials for minting installation access tokens (object)
     - When configured, generates a token from the app and uses it for all safe output operations (alternative to `github-token`)
     - Fields:
@@ -1110,7 +1137,7 @@ The YAML frontmatter supports these fields:
               run: echo "Custom threat check"
       ```
 
-- **`safe-inputs:`** - Define custom lightweight MCP tools as JavaScript, shell, Python, or Go scripts (object)
+- **`mcp-scripts:`** - Define custom lightweight MCP tools as JavaScript, shell, Python, or Go scripts (object)
   - Tools mounted in MCP server with access to specified secrets
   - Each tool requires `description` and one of: `script` (JavaScript), `run` (shell), `py` (Python), or `go` (Go)
   - Tool configuration properties:
@@ -1124,7 +1151,7 @@ The YAML frontmatter supports these fields:
     - `timeout:` - Execution timeout in seconds (default: 60)
   - Example:
     ```yaml
-    safe-inputs:
+    mcp-scripts:
       search-issues:
         description: "Search GitHub issues using API"
         inputs:
@@ -1304,7 +1331,11 @@ Create an issue with your final analysis.
 - **Permission Separation**: The main job doesn't need `issues: write` permission
 - **Automatic Processing**: AI output is automatically parsed and converted to GitHub issues
 - **Job Dependencies**: Issue creation only happens after the coding agent completes successfully
-- **Output Variables**: The created issue number and URL are available to downstream jobs
+- **Output Variables**: The safe-outputs job emits named step outputs for the first successful result of each type:
+  - `create-issue` → `created_issue_number`, `created_issue_url`
+  - `create-pull-request` → `created_pr_number`, `created_pr_url`
+  - `add-comment` → `comment_id`, `comment_url`
+  - `push-to-pull-request-branch` → `push_commit_sha`, `push_commit_url`
 
 ## Trigger Patterns
 
@@ -1809,7 +1840,11 @@ Create an issue with your final analysis.
 - **Permission Separation**: The main job doesn't need `issues: write` permission
 - **Automatic Processing**: AI output is automatically parsed and converted to GitHub issues
 - **Job Dependencies**: Issue creation only happens after the coding agent completes successfully
-- **Output Variables**: The created issue number and URL are available to downstream jobs
+- **Output Variables**: The safe-outputs job emits named step outputs for the first successful result of each type:
+  - `create-issue` → `created_issue_number`, `created_issue_url`
+  - `create-pull-request` → `created_pr_number`, `created_pr_url`
+  - `add-comment` → `comment_id`, `comment_url`
+  - `push-to-pull-request-branch` → `push_commit_sha`, `push_commit_url`
 
 ### Automatic Pull Request Creation
 

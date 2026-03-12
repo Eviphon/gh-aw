@@ -230,7 +230,7 @@ const (
 	// DefaultMCPGatewayPort is the default port for the MCP gateway HTTP service
 	DefaultMCPGatewayPort = 80
 
-	// DefaultMCPServerPort is the default port for MCP servers (safe-inputs server)
+	// DefaultMCPServerPort is the default port for MCP servers (mcp-scripts server)
 	DefaultMCPServerPort = 3000
 
 	// DefaultMCPInspectorPort is the default port for the MCP inspector (safe-outputs server)
@@ -341,7 +341,7 @@ const DefaultCodexVersion Version = "latest"
 const DefaultGeminiVersion Version = "latest"
 
 // DefaultGitHubMCPServerVersion is the default version of the GitHub MCP server Docker image
-const DefaultGitHubMCPServerVersion Version = "v0.31.0"
+const DefaultGitHubMCPServerVersion Version = "v0.32.0"
 
 // DefaultFirewallVersion is the default version of the gh-aw-firewall (AWF) binary
 const DefaultFirewallVersion Version = "v0.23.0"
@@ -358,7 +358,7 @@ const AWFProxyLogsDir = "/tmp/gh-aw/sandbox/firewall/logs"
 const AWFDefaultLogLevel = "info"
 
 // DefaultMCPGatewayVersion is the default version of the MCP Gateway (gh-aw-mcpg) Docker image
-const DefaultMCPGatewayVersion Version = "v0.1.8"
+const DefaultMCPGatewayVersion Version = "v0.1.14"
 
 // DefaultMCPGatewayContainer is the default container image for the MCP Gateway
 const DefaultMCPGatewayContainer = "ghcr.io/github/gh-aw-mcpg"
@@ -594,8 +594,22 @@ const DetectionJobName JobName = "detection"
 const SafeOutputArtifactName = "safe-output"
 const AgentOutputArtifactName = "agent-output"
 
+// AgentArtifactName is the name of the unified agent artifact that contains all agent job outputs,
+// including safe outputs, agent output, engine logs, and other agent-related files.
+const AgentArtifactName = "agent"
+
+// DetectionArtifactName is the artifact name for the threat detection log.
+const DetectionArtifactName = "detection"
+
+// LegacyDetectionArtifactName is the old artifact name used before the rename.
+// Kept for backward compatibility when downloading artifacts from older workflow runs.
+const LegacyDetectionArtifactName = "threat-detection.log"
+
 // AgentOutputFilename is the filename of the agent output JSON file
 const AgentOutputFilename = "agent_output.json"
+
+// SafeOutputsFilename is the filename of the raw safe outputs NDJSON file copied to /tmp/gh-aw/
+const SafeOutputsFilename = "safeoutputs.jsonl"
 
 // MCPServerID represents a built-in MCP server identifier.
 // This semantic type distinguishes MCP server IDs from arbitrary strings,
@@ -615,19 +629,19 @@ func (m MCPServerID) String() string {
 // SafeOutputsMCPServerID is the identifier for the safe-outputs MCP server
 const SafeOutputsMCPServerID MCPServerID = "safeoutputs"
 
-// SafeInputsMCPServerID is the identifier for the safe-inputs MCP server
-const SafeInputsMCPServerID MCPServerID = "safeinputs"
+// MCPScriptsMCPServerID is the identifier for the mcp-scripts MCP server
+const MCPScriptsMCPServerID MCPServerID = "mcpscripts"
 
-// SafeInputsMCPVersion is the version of the safe-inputs MCP server
-const SafeInputsMCPVersion = "1.0.0"
+// MCPScriptsMCPVersion is the version of the mcp-scripts MCP server
+const MCPScriptsMCPVersion = "1.0.0"
 
 // AgenticWorkflowsMCPServerID is the identifier for the agentic-workflows MCP server
 const AgenticWorkflowsMCPServerID MCPServerID = "agenticworkflows"
 
 // Feature flag identifiers
 const (
-	// SafeInputsFeatureFlag is the name of the feature flag for safe-inputs
-	SafeInputsFeatureFlag FeatureFlag = "safe-inputs"
+	// MCPScriptsFeatureFlag is the name of the feature flag for mcp-scripts
+	MCPScriptsFeatureFlag FeatureFlag = "mcp-scripts"
 	// MCPGatewayFeatureFlag is the feature flag name for enabling MCP gateway
 	MCPGatewayFeatureFlag FeatureFlag = "mcp-gateway"
 	// DisableXPIAPromptFeatureFlag is the feature flag name for disabling XPIA prompt
@@ -676,9 +690,11 @@ const (
 	GeminiEngine EngineName = "gemini"
 )
 
-// AgenticEngines lists all supported agentic engine names
-// Note: This remains a string slice for backward compatibility with existing code
-var AgenticEngines = []string{string(ClaudeEngine), string(CodexEngine), string(CopilotEngine)}
+// AgenticEngines lists all supported agentic engine names.
+// Deprecated: Use workflow.NewEngineCatalog(workflow.NewEngineRegistry()).IDs() for a
+// catalog-derived list. This slice is maintained for backward compatibility and must
+// stay in sync with the built-in engines registered in NewEngineCatalog.
+var AgenticEngines = []string{string(ClaudeEngine), string(CodexEngine), string(CopilotEngine), string(GeminiEngine)}
 
 // EngineOption represents a selectable AI engine with its display metadata and secret configuration
 type EngineOption struct {
@@ -692,7 +708,10 @@ type EngineOption struct {
 	WhenNeeded         string   // Human-readable description of when this secret is needed
 }
 
-// EngineOptions provides the list of available AI engines for user selection
+// EngineOptions provides the list of available AI engines for user selection.
+// Each entry includes secret metadata used by the interactive add wizard.
+// Must stay in sync with the built-in engines registered in workflow.NewEngineCatalog;
+// the TestEngineCatalogMatchesSchema test in pkg/workflow catches catalog/schema drift.
 var EngineOptions = []EngineOption{
 	{
 		Value:       string(CopilotEngine),
@@ -719,6 +738,14 @@ var EngineOptions = []EngineOption{
 		AlternativeSecrets: []string{"CODEX_API_KEY"},
 		KeyURL:             "https://platform.openai.com/api-keys",
 		WhenNeeded:         "Codex/OpenAI engine workflows",
+	},
+	{
+		Value:       string(GeminiEngine),
+		Label:       "Gemini",
+		Description: "Google Gemini CLI coding agent",
+		SecretName:  "GEMINI_API_KEY",
+		KeyURL:      "https://aistudio.google.com/app/apikey",
+		WhenNeeded:  "Gemini engine workflows",
 	},
 }
 

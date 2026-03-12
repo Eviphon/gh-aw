@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/github/gh-aw/pkg/constants"
 )
 
 // generateMainJobSteps generates the complete sequence of steps for the main agent execution job
@@ -17,6 +19,14 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 
 	// Build a CheckoutManager with any user-configured checkouts
 	checkoutMgr := NewCheckoutManager(data.CheckoutConfigs)
+
+	// Propagate the platform (host) repo resolved by the activation job so that
+	// checkout steps in this job and in safe_outputs can use the correct repository
+	// for .github/.agents sparse checkouts when called cross-repo.
+	// The activation job exposes this as needs.activation.outputs.target_repo.
+	if hasWorkflowCallTrigger(data.On) && !data.InlinedImports {
+		checkoutMgr.SetCrossRepoTargetRepo("${{ needs.activation.outputs.target_repo }}")
+	}
 
 	// Generate GitHub App token minting steps for checkouts with app auth
 	// These must be emitted BEFORE the checkout steps that reference them
@@ -229,8 +239,17 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 
 	// Add APM (Agent Package Manager) setup step if dependencies are specified
 	if data.APMDependencies != nil && len(data.APMDependencies.Packages) > 0 {
-		compilerYamlLog.Printf("Adding APM setup step: %d packages", len(data.APMDependencies.Packages))
-		apmStep := GenerateAPMDependenciesStep(data.APMDependencies, data)
+		// Download the pre-packed APM bundle from the separate "apm" artifact
+		compilerYamlLog.Printf("Adding APM bundle download step: %d packages", len(data.APMDependencies.Packages))
+		yaml.WriteString("      - name: Download APM bundle artifact\n")
+		fmt.Fprintf(yaml, "        uses: %s\n", GetActionPin("actions/download-artifact"))
+		yaml.WriteString("        with:\n")
+		yaml.WriteString("          name: apm\n")
+		yaml.WriteString("          path: /tmp/gh-aw/apm-bundle\n")
+
+		// Restore APM dependencies from bundle
+		compilerYamlLog.Printf("Adding APM restore step")
+		apmStep := GenerateAPMRestoreStep(data.APMDependencies, data)
 		for _, line := range apmStep {
 			yaml.WriteString(line + "\n")
 		}
@@ -272,6 +291,20 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 	gitCleanerSteps := c.generateGitCredentialsCleanerStep()
 	for _, line := range gitCleanerSteps {
 		yaml.WriteString(line)
+	}
+
+	// Emit engine config steps (from RenderConfig) before the AI execution step.
+	// These steps write runtime config files to disk (e.g. provider/model config files).
+	// Most engines return no steps here; only engines that require config files use this.
+	if len(data.EngineConfigSteps) > 0 {
+		compilerYamlLog.Printf("Adding %d engine config steps for %s", len(data.EngineConfigSteps), engine.GetID())
+		for _, step := range data.EngineConfigSteps {
+			stepYAML, err := ConvertStepToYAML(step)
+			if err != nil {
+				return fmt.Errorf("failed to render engine config step: %w", err)
+			}
+			yaml.WriteString(stepYAML)
+		}
 	}
 
 	// Add AI execution step using the agentic engine
@@ -327,9 +360,12 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 		c.generateOutputCollectionStep(yaml, data)
 	}
 
-	// Add engine-declared output files collection (if any)
-	if len(engine.GetDeclaredOutputFiles()) > 0 {
-		c.generateEngineOutputCollection(yaml, engine)
+	// Merge engine-declared output files into the unified artifact instead of creating a
+	// separate agent_outputs artifact. The cleanup step is still generated so workspace files
+	// are removed after collection.
+	if enginePaths := getEngineArtifactPaths(engine); len(enginePaths) > 0 {
+		artifactPaths = append(artifactPaths, enginePaths...)
+		c.generateEngineOutputCleanup(yaml, engine)
 	}
 
 	// Extract and upload squid access logs (if any proxy tools were used)
@@ -339,17 +375,17 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 	// Collect MCP logs path if any MCP tools were used
 	artifactPaths = append(artifactPaths, "/tmp/gh-aw/mcp-logs/")
 
-	// Collect SafeInputs logs path if safe-inputs is enabled
-	if IsSafeInputsEnabled(data.SafeInputs, data) {
-		artifactPaths = append(artifactPaths, "/tmp/gh-aw/safe-inputs/logs/")
+	// Collect MCPScripts logs path if mcp-scripts is enabled
+	if IsMCPScriptsEnabled(data.MCPScripts, data) {
+		artifactPaths = append(artifactPaths, "/tmp/gh-aw/mcp-scripts/logs/")
 	}
 
 	// parse agent logs for GITHUB_STEP_SUMMARY
 	c.generateLogParsing(yaml, engine)
 
-	// parse safe-inputs logs for GITHUB_STEP_SUMMARY (if safe-inputs is enabled)
-	if IsSafeInputsEnabled(data.SafeInputs, data) {
-		c.generateSafeInputsLogParsing(yaml)
+	// parse mcp-scripts logs for GITHUB_STEP_SUMMARY (if mcp-scripts is enabled)
+	if IsMCPScriptsEnabled(data.MCPScripts, data) {
+		c.generateMCPScriptsLogParsing(yaml)
 	}
 
 	// parse MCP gateway logs for GITHUB_STEP_SUMMARY
@@ -396,6 +432,15 @@ func (c *Compiler) generateMainJobSteps(yaml *strings.Builder, data *WorkflowDat
 	// This directory is used by workflows that instruct the agent to write files
 	// (e.g., smoke-claude status summaries)
 	artifactPaths = append(artifactPaths, "/tmp/gh-aw/agent/")
+
+	// Collect safe outputs and agent output paths for the unified artifact.
+	// These were previously uploaded as separate safe-output and agent-output artifacts.
+	if data.SafeOutputs != nil {
+		// Raw safe-output NDJSON (copied to /tmp/gh-aw/ by generateOutputCollectionStep)
+		artifactPaths = append(artifactPaths, "/tmp/gh-aw/"+constants.SafeOutputsFilename)
+		// Processed agent output JSON produced by collect_ndjson_output.cjs
+		artifactPaths = append(artifactPaths, "/tmp/gh-aw/"+constants.AgentOutputFilename)
+	}
 
 	// Add post-execution cleanup step for Copilot engine
 	if copilotEngine, ok := engine.(*CopilotEngine); ok {

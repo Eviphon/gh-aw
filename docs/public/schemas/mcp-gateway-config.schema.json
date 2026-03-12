@@ -160,6 +160,11 @@
             "type": "string"
           },
           "default": {}
+        },
+        "guard-policies": {
+          "type": "object",
+          "description": "Guard policies for access control at the MCP gateway level. The structure of guard policies is server-specific. For GitHub MCP server, see the GitHub guard policy schema. For other servers (Jira, WorkIQ), different policy schemas will apply.",
+          "additionalProperties": true
         }
       },
       "required": ["type", "url"],
@@ -303,7 +308,7 @@
     },
     {
       "mcpServers": {
-        "safe-inputs-server": {
+        "mcp-scripts-server": {
           "type": "safeinputs",
           "tools": {
             "greet-user": {
@@ -325,7 +330,7 @@
         "apiKey": "gateway-secret-token"
       },
       "customSchemas": {
-        "safeinputs": "https://docs.github.com/gh-aw/schemas/safe-inputs-config.schema.json"
+        "safeinputs": "https://docs.github.com/gh-aw/schemas/mcp-scripts-config.schema.json"
       }
     }
   ]

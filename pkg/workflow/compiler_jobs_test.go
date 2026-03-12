@@ -989,7 +989,54 @@ Test content`
 	}
 }
 
-// TestBuildJobsJobConditionExtraction tests that if conditions are properly extracted
+// TestBuildJobsWithReusableWorkflowSecretsInherit tests that secrets: inherit is correctly emitted
+// for reusable workflow call jobs.
+func TestBuildJobsWithReusableWorkflowSecretsInherit(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "reusable-workflow-secrets-inherit-test")
+
+	frontmatter := `---
+on: push
+permissions:
+  contents: read
+engine: copilot
+strict: false
+jobs:
+  call-other:
+    uses: owner/repo/.github/workflows/reusable.yml@main
+    secrets: inherit
+---
+
+# Test Workflow
+
+Test content`
+
+	testFile := filepath.Join(tmpDir, "test.md")
+	if err := os.WriteFile(testFile, []byte(frontmatter), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compiler := NewCompiler()
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		t.Fatalf("CompileWorkflow() error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, "test.lock.yml"))
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+	yamlStr := string(content)
+
+	if !strings.Contains(yamlStr, "uses: owner/repo/.github/workflows/reusable.yml@main") {
+		t.Error("Expected uses directive for reusable workflow")
+	}
+	if !strings.Contains(yamlStr, "secrets: inherit") {
+		t.Error("Expected 'secrets: inherit' directive")
+	}
+	if strings.Contains(yamlStr, "secrets:\n      ") {
+		t.Error("Should not emit secrets map when using inherit")
+	}
+}
+
 func TestBuildJobsJobConditionExtraction(t *testing.T) {
 	tmpDir := testutil.TempDir(t, "job-condition-test")
 
@@ -2528,6 +2575,93 @@ func TestBuildCustomJobsMapConcurrencyAndContainer(t *testing.T) {
 	// Verify container string form
 	if job.Container != "container: node:18" {
 		t.Errorf("Expected 'container: node:18', got: %q", job.Container)
+	}
+}
+
+// TestBuildCustomJobsMapConcurrencyDefaultsCancelInProgress tests that map-form concurrency
+// without cancel-in-progress defaults to cancel-in-progress: false for non-agent jobs.
+func TestBuildCustomJobsMapConcurrencyDefaultsCancelInProgress(t *testing.T) {
+	tests := []struct {
+		name            string
+		concurrencyMap  map[string]any
+		wantCancelFalse bool
+		wantCancelTrue  bool
+	}{
+		{
+			name: "no cancel-in-progress defaults to false",
+			concurrencyMap: map[string]any{
+				"group": "my-group",
+			},
+			wantCancelFalse: true,
+			wantCancelTrue:  false,
+		},
+		{
+			name: "explicit cancel-in-progress true is preserved",
+			concurrencyMap: map[string]any{
+				"group":              "my-group",
+				"cancel-in-progress": true,
+			},
+			wantCancelFalse: false,
+			wantCancelTrue:  true,
+		},
+		{
+			name: "explicit cancel-in-progress false is preserved",
+			concurrencyMap: map[string]any{
+				"group":              "my-group",
+				"cancel-in-progress": false,
+			},
+			wantCancelFalse: true,
+			wantCancelTrue:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compiler := NewCompiler()
+			compiler.jobManager = NewJobManager()
+
+			data := &WorkflowData{
+				Name:   "Test Workflow",
+				AI:     "copilot",
+				RunsOn: "runs-on: ubuntu-latest",
+				Jobs: map[string]any{
+					"custom_job": map[string]any{
+						"runs-on":     "ubuntu-latest",
+						"concurrency": tt.concurrencyMap,
+						"steps":       []any{map[string]any{"run": "echo 'test'"}},
+					},
+				},
+			}
+
+			err := compiler.buildCustomJobs(data, false)
+			if err != nil {
+				t.Fatalf("buildCustomJobs() returned error: %v", err)
+			}
+
+			job, exists := compiler.jobManager.GetJob("custom_job")
+			if !exists {
+				t.Fatal("Expected custom_job to be added")
+			}
+
+			if !strings.Contains(job.Concurrency, "concurrency:") {
+				t.Errorf("Expected 'concurrency:' header, got: %q", job.Concurrency)
+			}
+			if !strings.Contains(job.Concurrency, "group: my-group") {
+				t.Errorf("Expected 'group: my-group' in concurrency, got: %q", job.Concurrency)
+			}
+			if tt.wantCancelFalse && !strings.Contains(job.Concurrency, "cancel-in-progress: false") {
+				t.Errorf("Expected 'cancel-in-progress: false' in concurrency, got: %q", job.Concurrency)
+			}
+			if tt.wantCancelTrue && !strings.Contains(job.Concurrency, "cancel-in-progress: true") {
+				t.Errorf("Expected 'cancel-in-progress: true' in concurrency, got: %q", job.Concurrency)
+			}
+			if !tt.wantCancelFalse && strings.Contains(job.Concurrency, "cancel-in-progress: false") {
+				t.Errorf("Did not expect 'cancel-in-progress: false' in concurrency, got: %q", job.Concurrency)
+			}
+			if !tt.wantCancelTrue && strings.Contains(job.Concurrency, "cancel-in-progress: true") {
+				t.Errorf("Did not expect 'cancel-in-progress: true' in concurrency, got: %q", job.Concurrency)
+			}
+		})
 	}
 }
 

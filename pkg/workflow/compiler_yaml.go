@@ -101,13 +101,22 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 	}
 
 	// Add manifest of imported/included files if any exist
-	if len(data.ImportedFiles) > 0 || len(data.IncludedFiles) > 0 {
+	// Build a user-visible imports list by filtering out internal builtin engine paths
+	// (e.g. "@builtin:engines/copilot.md") which are implementation details.
+	var visibleImports []string
+	for _, file := range data.ImportedFiles {
+		if !strings.HasPrefix(file, parser.BuiltinPathPrefix) {
+			visibleImports = append(visibleImports, file)
+		}
+	}
+
+	if len(visibleImports) > 0 || len(data.IncludedFiles) > 0 {
 		yaml.WriteString("#\n")
 		yaml.WriteString("# Resolved workflow manifest:\n")
 
-		if len(data.ImportedFiles) > 0 {
+		if len(visibleImports) > 0 {
 			yaml.WriteString("#   Imports:\n")
-			for _, file := range data.ImportedFiles {
+			for _, file := range visibleImports {
 				cleanFile := stringutil.StripANSI(file)
 				// Normalize to Unix paths (forward slashes) for cross-platform compatibility
 				cleanFile = filepath.ToSlash(cleanFile)
@@ -637,6 +646,11 @@ func (c *Compiler) generateCreateAwInfo(yaml *strings.Builder, data *WorkflowDat
 	// validateLockdownRequirements uses this to enforce strict: true for public repositories.
 	// Use effectiveStrictMode to infer strictness from the source (frontmatter), not just the CLI flag.
 	fmt.Fprintf(yaml, "          GH_AW_COMPILED_STRICT: \"%t\"\n", c.effectiveStrictMode(data.RawFrontmatter))
+	// When a workflow_call trigger is present, pass the target_repo resolved by the
+	// resolve-host-repo step so it can be stored in aw_info.json for observability.
+	if hasWorkflowCallTrigger(data.On) && !data.InlinedImports {
+		yaml.WriteString("          GH_AW_INFO_TARGET_REPO: ${{ steps.resolve-host-repo.outputs.target_repo }}\n")
+	}
 	// Include lockdown validation env vars when lockdown is explicitly enabled.
 	// validateLockdownRequirements is called from generate_aw_info.cjs and uses these vars.
 	githubTool, hasGitHub := data.Tools["github"]
@@ -656,16 +670,13 @@ func (c *Compiler) generateCreateAwInfo(yaml *strings.Builder, data *WorkflowDat
 }
 
 func (c *Compiler) generateOutputCollectionStep(yaml *strings.Builder, data *WorkflowData) {
-	// Record artifact upload for validation
-	c.stepOrderTracker.RecordArtifactUpload("Upload Safe Outputs", []string{"${{ env.GH_AW_SAFE_OUTPUTS }}"})
-
-	yaml.WriteString("      - name: Upload Safe Outputs\n")
+	// Copy the raw safe-output NDJSON to a /tmp/gh-aw/ path so it can be included in the
+	// unified agent artifact together with all other /tmp/gh-aw/ outputs.
+	yaml.WriteString("      - name: Copy safe outputs\n")
 	yaml.WriteString("        if: always()\n")
-	fmt.Fprintf(yaml, "        uses: %s\n", GetActionPin("actions/upload-artifact"))
-	yaml.WriteString("        with:\n")
-	fmt.Fprintf(yaml, "          name: %s\n", constants.SafeOutputArtifactName)
-	yaml.WriteString("          path: ${{ env.GH_AW_SAFE_OUTPUTS }}\n")
-	yaml.WriteString("          if-no-files-found: warn\n")
+	yaml.WriteString("        run: |\n")
+	fmt.Fprintf(yaml, "          mkdir -p /tmp/gh-aw\n")
+	fmt.Fprintf(yaml, "          cp \"$GH_AW_SAFE_OUTPUTS\" /tmp/gh-aw/%s 2>/dev/null || true\n", constants.SafeOutputsFilename)
 
 	yaml.WriteString("      - name: Ingest agent output\n")
 	yaml.WriteString("        id: collect_output\n")
@@ -717,17 +728,6 @@ func (c *Compiler) generateOutputCollectionStep(yaml *strings.Builder, data *Wor
 	yaml.WriteString("            setupGlobals(core, github, context, exec, io);\n")
 	yaml.WriteString("            const { main } = require('/opt/gh-aw/actions/collect_ndjson_output.cjs');\n")
 	yaml.WriteString("            await main();\n")
-
-	// Record artifact upload for validation
-	c.stepOrderTracker.RecordArtifactUpload("Upload sanitized agent output", []string{"${{ env.GH_AW_AGENT_OUTPUT }}"})
-
-	yaml.WriteString("      - name: Upload sanitized agent output\n")
-	yaml.WriteString("        if: always() && env.GH_AW_AGENT_OUTPUT\n")
-	fmt.Fprintf(yaml, "        uses: %s\n", GetActionPin("actions/upload-artifact"))
-	yaml.WriteString("        with:\n")
-	fmt.Fprintf(yaml, "          name: %s\n", constants.AgentOutputArtifactName)
-	yaml.WriteString("          path: ${{ env.GH_AW_AGENT_OUTPUT }}\n")
-	yaml.WriteString("          if-no-files-found: warn\n")
 
 }
 

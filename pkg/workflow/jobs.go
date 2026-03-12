@@ -34,9 +34,10 @@ type Job struct {
 	Outputs                    map[string]string
 
 	// Reusable workflow call properties
-	Uses    string            // Path to reusable workflow (e.g., ./.github/workflows/reusable.yml)
-	With    map[string]any    // Input parameters for reusable workflow
-	Secrets map[string]string // Secrets for reusable workflow
+	Uses           string            // Path to reusable workflow (e.g., ./.github/workflows/reusable.yml)
+	With           map[string]any    // Input parameters for reusable workflow
+	Secrets        map[string]string // Secrets for reusable workflow (explicit mappings)
+	SecretsInherit bool              // When true, emits "secrets: inherit" (passes all caller secrets)
 }
 
 // JobManager manages a collection of jobs and handles dependency validation
@@ -115,6 +116,15 @@ func (jm *JobManager) ValidateDuplicateSteps() error {
 		seen := make(map[string]int)
 
 		for i, step := range job.Steps {
+			// job.Steps entries may be either complete step blocks (multi-line) or
+			// individual YAML line fragments. Only elements that begin with the step
+			// leader "- " represent a new step definition; property lines (e.g.,
+			// "continue-on-error:", "name:" inside a "with:" block) start with
+			// plain indentation and should not be treated as step definitions.
+			if !strings.HasPrefix(strings.TrimSpace(step), "-") {
+				continue
+			}
+
 			// Extract step name from YAML for comparison
 			stepName := extractStepName(step)
 			if stepName == "" {
@@ -390,7 +400,9 @@ func (jm *JobManager) renderJob(job *Job) string {
 		}
 
 		// Add secrets if present
-		if len(job.Secrets) > 0 {
+		if job.SecretsInherit {
+			yaml.WriteString("    secrets: inherit\n")
+		} else if len(job.Secrets) > 0 {
 			yaml.WriteString("    secrets:\n")
 			// Sort secret keys for consistent output
 			secretKeys := make([]string, 0, len(job.Secrets))

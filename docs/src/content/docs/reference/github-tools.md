@@ -69,7 +69,7 @@ tools:
     mode: remote
     toolsets: [default]
     repos: "all"
-    min-integrity: reader
+    min-integrity: unapproved
 ```
 
 Both `repos` and `min-integrity` are required when either is specified.
@@ -96,19 +96,29 @@ tools:
       - "myorg/*"
       - "partner/shared-repo"
       - "myorg/api-*"
-    min-integrity: writer
+    min-integrity: approved
 ```
 
 ### `min-integrity`
 
-Sets the minimum integrity level required for repository access:
+Sets the minimum integrity level required for repository access.
 
-| Level | Description |
-|-------|-------------|
-| `none` | No integrity requirements |
-| `reader` | Read-level integrity |
-| `writer` | Write-level integrity |
-| `merged` | Merged-level integrity |
+#### Integrity Level Definitions
+
+Integrity levels are determined based on the combination of the `author_association` field associated with GitHub objects (issues, pull requests, comments, etc.) and whether an object is reachable from the main branch:
+
+| Level | Criteria |
+|-------|----------|
+| `merged` | Objects reachable from the main branch (regardless of authorship) |
+| `approved` | Objects with `author_association` of `OWNER`, `MEMBER`, or `COLLABORATOR` |
+| `unapproved` | Objects with `author_association` of `CONTRIBUTOR` or `FIRST_TIME_CONTRIBUTOR` |
+| `none` | Objects with `author_association` of `FIRST_TIMER` or `NONE` |
+
+**How it works:**
+- **Merged content** has the highest integrity because it has been reviewed and merged into the main branch
+- **Approved contributors** (owners, members, collaborators) have established trust relationships with the repository
+- **Unapproved contributors** have made contributions but lack formal repository access
+- **None level** includes first-time interactions and users with no prior contribution history
 
 ### Examples
 
@@ -131,7 +141,26 @@ tools:
     repos:
       - "frontend-org/*"
       - "backend-org/*"
-    min-integrity: writer
+    min-integrity: approved
+```
+
+### Safe Outputs Integration
+
+When you configure `repos` as an array of specific repository patterns, the compiler automatically derives a linked guard-policy for the [safe outputs](/gh-aw/reference/safe-outputs/) MCP server. Each entry in the `repos` list is added as a `private` accept entry in the safeoutputs policy, allowing the MCP gateway to read private repository data through the GitHub tools and still write outputs via safeoutputs.
+
+This derivation happens at compile time and requires no additional configuration. If you use `repos: "all"` or `repos: "public"`, no safeoutputs guard-policy is derived.
+
+```yaml wrap
+tools:
+  github:
+    mode: remote
+    toolsets: [default]
+    repos:
+      - "myorg/private-repo"   # automatically added to safeoutputs guard-policy
+      - "myorg/another-repo"   # automatically added to safeoutputs guard-policy
+    min-integrity: approved
+safe-outputs:
+  create-issue:                # safe outputs can write to the guard-policy repos
 ```
 
 ## Lockdown Mode for Public Repositories

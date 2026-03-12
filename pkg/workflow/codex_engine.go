@@ -63,10 +63,10 @@ func (e *CodexEngine) GetRequiredSecretNames(workflowData *WorkflowData) []strin
 		secrets = append(secrets, "MCP_GATEWAY_API_KEY")
 	}
 
-	// Add safe-inputs secret names
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName := range safeInputsSecrets {
+	// Add mcp-scripts secret names
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName := range mcpScriptsSecrets {
 			secrets = append(secrets, varName)
 		}
 	}
@@ -171,10 +171,13 @@ func (e *CodexEngine) GetExecutionSteps(workflowData *WorkflowData, logFile stri
 	}
 	modelParam := fmt.Sprintf(`${%s:+-c model="$%s" }`, modelEnvVar, modelEnvVar)
 
-	// Build search parameter if web-search tool is present
-	webSearchParam := ""
+	// Build search parameter: disable web search by default, enable only if web-search tool is present.
+	// Codex enables web search by default, so we must explicitly pass --no-search to disable it.
+	// See https://developers.openai.com/codex/cli/features/#web-search
+	// Leading space is intentional: the format string concatenates this directly after "exec" with no space separator.
+	webSearchParam := " --no-search"
 	if workflowData.ParsedTools != nil && workflowData.ParsedTools.WebSearch != nil {
-		webSearchParam = "--search "
+		webSearchParam = " --search"
 	}
 
 	// See https://github.com/github/gh-aw/issues/892
@@ -275,8 +278,10 @@ mkdir -p "$CODEX_HOME/logs"
 		// The runner's original path is unreachable within the AWF isolated filesystem;
 		// we create this file before the agent starts and append it to the real
 		// $GITHUB_STEP_SUMMARY after secret redaction.
-		"GITHUB_STEP_SUMMARY":          AgentStepSummaryPath,
-		"GH_AW_PROMPT":                 "/tmp/gh-aw/aw-prompts/prompt.txt",
+		"GITHUB_STEP_SUMMARY": AgentStepSummaryPath,
+		"GH_AW_PROMPT":        "/tmp/gh-aw/aw-prompts/prompt.txt",
+		// Tag the step as a GitHub AW agentic execution for discoverability by agents
+		"GITHUB_AW":                    "true",
 		"GH_AW_MCP_CONFIG":             "/tmp/gh-aw/mcp-config/config.toml",
 		"CODEX_HOME":                   "/tmp/gh-aw/mcp-config",
 		"RUST_LOG":                     "trace,hyper_util=info,mio=info,reqwest=info,os_info=info,codex_otel=warn,codex_core=debug,ocodex_exec=debug",
@@ -284,9 +289,28 @@ mkdir -p "$CODEX_HOME/logs"
 		"GITHUB_PERSONAL_ACCESS_TOKEN": effectiveGitHubToken,                                     // Used by GitHub MCP server via env_vars
 		"OPENAI_API_KEY":               "${{ secrets.CODEX_API_KEY || secrets.OPENAI_API_KEY }}", // Fallback for CODEX_API_KEY
 	}
+	// Indicate the phase: "agent" for the main run, "detection" for threat detection
+	// Include the compiler version so agents can identify which gh-aw version generated the workflow
+	if workflowData.IsDetectionRun {
+		env["GH_AW_PHASE"] = "detection"
+	} else {
+		env["GH_AW_PHASE"] = "agent"
+	}
+	if IsRelease() {
+		env["GH_AW_VERSION"] = GetVersion()
+	} else {
+		env["GH_AW_VERSION"] = "dev"
+	}
 
 	// Add GH_AW_SAFE_OUTPUTS if output is needed
 	applySafeOutputEnvToMap(env, workflowData)
+
+	// In sandbox (AWF) mode, set git identity environment variables so the first git commit
+	// succeeds inside the container. AWF's --env-all forwards these to the container, ensuring
+	// git does not rely on the host-side ~/.gitconfig which is not visible in the sandbox.
+	if firewallEnabled {
+		maps.Copy(env, getGitIdentityEnvVars())
+	}
 
 	// Add GH_AW_STARTUP_TIMEOUT environment variable (in seconds) if startup-timeout is specified
 	if workflowData.ToolsStartupTimeout > 0 {
@@ -322,10 +346,10 @@ mkdir -p "$CODEX_HOME/logs"
 		codexEngineLog.Printf("Added %d custom env vars from agent config", len(agentConfig.Env))
 	}
 
-	// Add safe-inputs secrets to env for passthrough to MCP servers
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName, secretExpr := range safeInputsSecrets {
+	// Add mcp-scripts secrets to env for passthrough to MCP servers
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName, secretExpr := range mcpScriptsSecrets {
 			// Only add if not already in env
 			if _, exists := env[varName]; !exists {
 				env[varName] = secretExpr

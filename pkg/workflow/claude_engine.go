@@ -40,6 +40,11 @@ func (e *ClaudeEngine) GetModelEnvVarName() string {
 	return constants.ClaudeCLIModelEnvVar
 }
 
+// GetAPMTarget returns "claude" so that apm-action packs Claude-specific primitives.
+func (e *ClaudeEngine) GetAPMTarget() string {
+	return "claude"
+}
+
 // GetRequiredSecretNames returns the list of secrets required by the Claude engine
 // This includes ANTHROPIC_API_KEY and optionally MCP_GATEWAY_API_KEY
 func (e *ClaudeEngine) GetRequiredSecretNames(workflowData *WorkflowData) []string {
@@ -50,10 +55,10 @@ func (e *ClaudeEngine) GetRequiredSecretNames(workflowData *WorkflowData) []stri
 		secrets = append(secrets, "MCP_GATEWAY_API_KEY")
 	}
 
-	// Add safe-inputs secret names
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName := range safeInputsSecrets {
+	// Add mcp-scripts secret names
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName := range mcpScriptsSecrets {
 			secrets = append(secrets, varName)
 		}
 	}
@@ -345,6 +350,8 @@ func (e *ClaudeEngine) GetExecutionSteps(workflowData *WorkflowData, logFile str
 		"DISABLE_ERROR_REPORTING": "1",
 		"DISABLE_BUG_COMMAND":     "1",
 		"GH_AW_PROMPT":            "/tmp/gh-aw/aw-prompts/prompt.txt",
+		// Tag the step as a GitHub AW agentic execution for discoverability by agents
+		"GITHUB_AW": "true",
 		// Override GITHUB_STEP_SUMMARY with a path that exists inside the sandbox.
 		// The runner's original path is unreachable within the AWF isolated filesystem;
 		// we create this file before the agent starts and append it to the real
@@ -352,10 +359,29 @@ func (e *ClaudeEngine) GetExecutionSteps(workflowData *WorkflowData, logFile str
 		"GITHUB_STEP_SUMMARY": AgentStepSummaryPath,
 		"GITHUB_WORKSPACE":    "${{ github.workspace }}",
 	}
+	// Indicate the phase: "agent" for the main run, "detection" for threat detection
+	// Include the compiler version so agents can identify which gh-aw version generated the workflow
+	if workflowData.IsDetectionRun {
+		env["GH_AW_PHASE"] = "detection"
+	} else {
+		env["GH_AW_PHASE"] = "agent"
+	}
+	if IsRelease() {
+		env["GH_AW_VERSION"] = GetVersion()
+	} else {
+		env["GH_AW_VERSION"] = "dev"
+	}
 
 	// Add GH_AW_MCP_CONFIG for MCP server configuration only if there are MCP servers
 	if HasMCPServers(workflowData) {
 		env["GH_AW_MCP_CONFIG"] = "/tmp/gh-aw/mcp-config/mcp-servers.json"
+	}
+
+	// In sandbox (AWF) mode, set git identity environment variables so the first git commit
+	// succeeds inside the container. AWF's --env-all forwards these to the container, ensuring
+	// git does not rely on the host-side ~/.gitconfig which is not visible in the sandbox.
+	if isFirewallEnabled(workflowData) {
+		maps.Copy(env, getGitIdentityEnvVars())
 	}
 
 	// Set timeout environment variables for Claude Code
@@ -424,10 +450,10 @@ func (e *ClaudeEngine) GetExecutionSteps(workflowData *WorkflowData, logFile str
 		claudeLog.Printf("Added %d custom env vars from agent config", len(agentConfig.Env))
 	}
 
-	// Add safe-inputs secrets to env for passthrough to MCP servers
-	if IsSafeInputsEnabled(workflowData.SafeInputs, workflowData) {
-		safeInputsSecrets := collectSafeInputsSecrets(workflowData.SafeInputs)
-		for varName, secretExpr := range safeInputsSecrets {
+	// Add mcp-scripts secrets to env for passthrough to MCP servers
+	if IsMCPScriptsEnabled(workflowData.MCPScripts, workflowData) {
+		mcpScriptsSecrets := collectMCPScriptsSecrets(workflowData.MCPScripts)
+		for varName, secretExpr := range mcpScriptsSecrets {
 			// Only add if not already in env
 			if _, exists := env[varName]; !exists {
 				env[varName] = secretExpr

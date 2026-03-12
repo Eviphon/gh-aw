@@ -50,7 +50,12 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	if data.SafeOutputs.GitHubApp != nil {
 		// Compute permissions based on configured safe outputs (principle of least privilege)
 		permissions := ComputePermissionsForSafeOutputs(data.SafeOutputs)
-		steps = append(steps, c.buildGitHubAppTokenMintStep(data.SafeOutputs.GitHubApp, permissions)...)
+		// For workflow_call relay workflows, scope the token to the platform repo.
+		var appTokenFallbackRepo string
+		if hasWorkflowCallTrigger(data.On) {
+			appTokenFallbackRepo = "${{ needs.activation.outputs.target_repo }}"
+		}
+		steps = append(steps, c.buildGitHubAppTokenMintStep(data.SafeOutputs.GitHubApp, permissions, appTokenFallbackRepo)...)
 	}
 
 	// Add artifact download steps once (shared by noop and conclusion steps)
@@ -187,6 +192,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 			// Add validation status for each memory
 			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_REPO_MEMORY_VALIDATION_FAILED_%s: ${{ needs.push_repo_memory.outputs.validation_failed_%s }}\n", memory.ID, memory.ID))
 			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_REPO_MEMORY_VALIDATION_ERROR_%s: ${{ needs.push_repo_memory.outputs.validation_error_%s }}\n", memory.ID, memory.ID))
+			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_REPO_MEMORY_PATCH_SIZE_EXCEEDED_%s: ${{ needs.push_repo_memory.outputs.patch_size_exceeded_%s }}\n", memory.ID, memory.ID))
 		}
 	}
 
@@ -195,6 +201,18 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_GROUP_REPORTS: \"true\"\n")
 	} else {
 		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_GROUP_REPORTS: \"false\"\n")
+	}
+
+	// Pass report-failure-as-issue configuration flag (defaults to true if not specified)
+	if data.SafeOutputs != nil && data.SafeOutputs.ReportFailureAsIssue != nil && !*data.SafeOutputs.ReportFailureAsIssue {
+		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"false\"\n")
+	} else {
+		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"true\"\n")
+	}
+
+	// Pass failure-issue-repo configuration (optional, defaults to current repo)
+	if data.SafeOutputs != nil && data.SafeOutputs.FailureIssueRepo != "" {
+		agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_FAILURE_ISSUE_REPO: %q\n", data.SafeOutputs.FailureIssueRepo))
 	}
 
 	// Pass timeout minutes value so the failure handler can provide an actionable hint when timed out
@@ -407,6 +425,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		Name:        "conclusion",
 		If:          condition.Render(),
 		RunsOn:      c.formatSafeOutputsRunsOn(data.SafeOutputs),
+		Environment: c.indentYAMLLines(resolveSafeOutputsEnvironment(data), "    "),
 		Permissions: permissions.RenderToYAML(),
 		Concurrency: concurrency,
 		Steps:       steps,
@@ -417,8 +436,23 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	return job, nil
 }
 
+// systemSafeOutputJobNames contains job names that are built-in system jobs and should not be
+// treated as custom safe output job types in the GH_AW_SAFE_OUTPUT_JOBS mapping.
+// The safe output handler manager uses this mapping to determine which message types are
+// handled by custom job steps (and therefore should be silently skipped rather than flagged
+// as "no handler loaded").
+var systemSafeOutputJobNames = map[string]bool{
+	"safe_outputs":  true, // consolidated safe outputs job
+	"upload_assets": true, // upload assets job
+}
+
 // buildSafeOutputJobsEnvVars creates environment variables for safe output job URLs
-// Returns both a JSON mapping and the actual environment variable declarations
+// Returns both a JSON mapping and the actual environment variable declarations.
+// The mapping includes:
+//   - Built-in jobs with known URL outputs (e.g., create_issue → issue_url)
+//   - Custom safe-output jobs (from safe-outputs.jobs) with an empty URL key, so the handler
+//     manager knows those message types are handled by a dedicated job step and should be
+//     skipped gracefully rather than reported as "No handler loaded".
 func buildSafeOutputJobsEnvVars(jobNames []string) (string, []string) {
 	// Map job names to their expected URL output keys
 	jobOutputMapping := make(map[string]string)
@@ -448,7 +482,11 @@ func buildSafeOutputJobsEnvVars(jobNames []string) (string, []string) {
 		case "push_to_pull_request_branch":
 			urlKey = "commit_url"
 		default:
-			// Skip jobs that don't have URL outputs
+			if !systemSafeOutputJobNames[jobName] {
+				// Custom safe-output job: include in the mapping with an empty URL key so the
+				// handler manager can silently skip messages of this type.
+				jobOutputMapping[jobName] = ""
+			}
 			continue
 		}
 

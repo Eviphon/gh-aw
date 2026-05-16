@@ -56,7 +56,7 @@
         "stage": "finish",
         "template": [
           "stage=finish",
-          "status=failure",
+          "\u003c*\u003e",
           "tokens=\u003cNUM\u003e"
         ]
       }
